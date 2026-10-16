@@ -413,10 +413,6 @@ Falco уже получает события ядра и проверяет их
 
 В стенде используются Elasticsearch и Kibana версии `9.5.5`, а также Falcosidekick версии `2.35.0`. Версии Elasticsearch и Kibana совпадают полностью, как требует [документация Elastic](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/installing-elasticsearch). Elasticsearch и Kibana загружаются из [официального реестра Elastic](https://www.docker.elastic.co/), а Falcosidekick — из [Docker Hub](https://hub.docker.com/r/falcosecurity/falcosidekick). Номера версий указаны явно, чтобы обновление образа не изменило стенд незаметно.
 
-В нашей лабораторной сети прямой доступ к внешним реестрам закрыт, поэтому Docker должен обращаться к ним через прокси-сервер `px.usergate.com:3131`. Прокси участвует только в загрузке образов. Обмен между Falcosidekick, Elasticsearch и Kibana остаётся внутри отдельной сети Docker и через прокси не проходит.
-
-#### Настройка прокси для Docker
-
 Сначала подготовим параметр ядра, необходимый Elasticsearch для работы с отображаемыми в память файлами. Для современных версий Elastic рекомендует значение `1048576` для [`vm.max_map_count`](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/vm-max-map-count).
 
 ```bash
