@@ -121,9 +121,9 @@ Linux разделяет полномочия суперпользователя
 
 Для запуска всех компонентов на одной виртуальной машине выделим следующие ресурсы.
 
-- 4 виртуальных процессора.
+- 6 виртуальных процессоров.
 - 12 ГБ оперативной памяти.
-- 80 ГБ динамически расширяемого диска.
+- 100 ГБ динамически расширяемого диска.
 - Сетевой адаптер в режиме сетевого моста (для доступа к Kibana).
 - Минимальная установка Ubuntu Server без графической оболочки.
 
@@ -151,19 +151,109 @@ Linux разделяет полномочия суперпользователя
 
 Falco устанавливается непосредственно в гостевую операционную систему и получает события её ядра. Falcosidekick, Elasticsearch и Kibana можно запустить через Docker Compose. Размещение всех компонентов на одном узле удобно для лаборатории, но не является примером промышленной архитектуры. В рабочей среде события обычно отправляют на отдельный узел, чтобы после компрометации контейнерного хоста их нельзя было удалить вместе с локальными данными.
 
-### Подготовка системы
+### Подготовка системы и установка базовых инструментов
 
 После установки Ubuntu обновим систему.
 
 ```bash
 sudo apt update
 sudo apt full-upgrade -y
+sudo apt install -y ca-certificates curl gnupg git jq make dialog
 sudo reboot
 ```
+
+Проверим версию ядра и используемую иерархию групп управления ресурсами:
+
+```bash
+uname -a && stat -fc %T /sys/fs/cgroup && findmnt -t cgroup2
+```
+
+<details>
+<summary>Развернуть вывод команды</summary>
+```text
+Linux scrockcontainers 6.8.0-147-generic #147-Ubuntu SMP PREEMPT_DYNAMIC Thu
+Sep 24 11:33:16 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+
+cgroup2fs
+
+TARGET        SOURCE FSTYPE OPTIONS
+/sys/fs/cgroup
+              cgroup2
+                     cgroup
+                     rw,nosuid,nodev,noexec,relatime,nsdelegate,memory_r
+```
+</details>
+
+
+Команда `stat` должна вывести `cgroup2fs`, а `findmnt` должна показать подключённую файловую систему `cgroup2`.
 
 После перезагрузки создадим в гипервизоре снимок виртуальной машины с именем `clean-os`. Это будет контрольная точка с чистой обновлённой системой, к которой можно вернуться после неудачной установки или эксперимента. Сам снимок создаётся средствами гипервизора.
 
 После этого можно переходить к установке Docker, Falco и остальных компонентов стенда.
+
+### Установка Docker Engine
+
+Docker установим из [официального репозитория](https://docs.docker.com/engine/install/ubuntu/).
+
+```bash
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io \
+  docker-buildx-plugin docker-compose-plugin
+```
+
+После установки проверим службу и запустим тестовый контейнер:
+
+```bash
+sudo systemctl --no-pager --full status docker
+sudo docker run --rm hello-world
+sudo docker version
+sudo docker compose version
+sudo docker info --format \
+  'cgroup driver={{.CgroupDriver}}; cgroup version={{.CgroupVersion}}'
+```
+
+Команды Docker в статье выполняются через `sudo`. Добавление пользователя в группу `docker` не выдаёт ограниченное разрешение на запуск контейнеров. Docker прямо предупреждает, что [членство в этой группе предоставляет полномочия суперпользователя (`root`)](https://docs.docker.com/engine/install/linux-postinstall/#manage-docker-as-a-non-root-user).
+
+### Установка Falco
+
+[Falco](https://falco.org/docs/) получает события ядра и проверяет их по набору правил. Начиная с версии 0.38, Falco по умолчанию использует современный драйвер на основе eBPF. В настройках он называется `modern_ebpf`. Для стенда выберем его явно.
+
+```bash
+curl -fsSL https://falco.org/repo/falcosecurity-packages.asc | \
+  sudo gpg --dearmor -o /usr/share/keyrings/falco-archive-keyring.gpg
+
+echo 'deb [signed-by=/usr/share/keyrings/falco-archive-keyring.gpg] https://download.falco.org/packages/deb stable main' | \
+  sudo tee /etc/apt/sources.list.d/falcosecurity.list
+
+sudo apt update
+sudo env FALCO_FRONTEND=noninteractive \
+  FALCO_DRIVER_CHOICE=modern_ebpf \
+  apt install -y falco
+```
+
+Проверим состояние службы:
+
+```bash
+sudo systemctl --no-pager --full status falco-modern-bpf.service
+sudo journalctl -u falco-modern-bpf.service -n 50 --no-pager
+sudo falco --version
+```
+
+Актуальные варианты установки и имена служб приведены в [документации Falco](https://falco.org/docs/installation/). Перед публикацией статьи зафиксируем проверенные версии Falco и набора правил в репозитории, чтобы обновление пакета не меняло результаты лаборатории.
 
 
 
