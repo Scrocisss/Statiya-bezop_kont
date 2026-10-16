@@ -411,7 +411,11 @@ Driver:
 
 Falco уже получает события ядра и проверяет их по правилам, но его журнал неудобен для поиска и сравнения экспериментов. Добавим три компонента. [`Falcosidekick`](https://github.com/falcosecurity/falcosidekick) примет уведомления Falco по протоколу HTTP и передаст их в Elasticsearch. Elasticsearch сохранит события, а Kibana позволит искать их и строить представления. Все три компонента запустим на лабораторной машине через Docker Compose.
 
-В стенде используются Elasticsearch и Kibana версии `9.5.5`, а также Falcosidekick версии `2.35.0`. Версии Elasticsearch и Kibana совпадают полностью, как требует [документация Elastic](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/installing-elasticsearch). Контейнерные образы загружаются через зеркало Яндекса `cr.yandex/mirror`, поэтому его адрес указан непосредственно в файле Compose. Для Elasticsearch и Kibana используются официальные образы Docker Hub, сопровождаемые командой Elastic.
+В стенде используются Elasticsearch и Kibana версии `9.5.5`, а также Falcosidekick версии `2.35.0`. Версии Elasticsearch и Kibana совпадают полностью, как требует [документация Elastic](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/installing-elasticsearch). Elasticsearch и Kibana загружаются из [официального реестра Elastic](https://www.docker.elastic.co/), а Falcosidekick — из [Docker Hub](https://hub.docker.com/r/falcosecurity/falcosidekick). Номера версий указаны явно, чтобы обновление образа не изменило стенд незаметно.
+
+В нашей лабораторной сети прямой доступ к внешним реестрам закрыт, поэтому Docker должен обращаться к ним через прокси-сервер `px.usergate.com:3131`. Прокси участвует только в загрузке образов. Обмен между Falcosidekick, Elasticsearch и Kibana остаётся внутри отдельной сети Docker и через прокси не проходит.
+
+#### Настройка прокси для Docker
 
 Сначала подготовим параметр ядра, необходимый Elasticsearch для работы с отображаемыми в память файлами. Для современных версий Elastic рекомендует значение `1048576` для [`vm.max_map_count`](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/vm-max-map-count).
 
@@ -421,54 +425,6 @@ echo 'vm.max_map_count=1048576' | \
 sudo sysctl --system
 sysctl vm.max_map_count
 ```
-
-<details>
-<summary>Развернуть вывод команды</summary>
-
-  ```bash
-scrock_@scrockcontainers:~$ echo 'vm.max_map_count=1048576' | \
-  sudo tee /etc/sysctl.d/99-elasticsearch.conf
-sudo sysctl --system
-sysctl vm.max_map_count
-vm.max_map_count=1048576
-* Applying /usr/lib/sysctl.d/10-apparmor.conf ...
-* Applying /etc/sysctl.d/10-bufferbloat.conf ...
-* Applying /etc/sysctl.d/10-console-messages.conf ...
-* Applying /etc/sysctl.d/10-ipv6-privacy.conf ...
-* Applying /etc/sysctl.d/10-kernel-hardening.conf ...
-* Applying /etc/sysctl.d/10-magic-sysrq.conf ...
-* Applying /etc/sysctl.d/10-map-count.conf ...
-* Applying /etc/sysctl.d/10-network-security.conf ...
-* Applying /etc/sysctl.d/10-ptrace.conf ...
-* Applying /etc/sysctl.d/10-zeropage.conf ...
-* Applying /usr/lib/sysctl.d/50-pid-max.conf ...
-* Applying /etc/sysctl.d/99-elasticsearch.conf ...
-* Applying /usr/lib/sysctl.d/99-protect-links.conf ...
-* Applying /etc/sysctl.d/99-sysctl.conf ...
-* Applying /etc/sysctl.conf ...
-kernel.apparmor_restrict_unprivileged_userns = 1
-net.core.default_qdisc = fq_codel
-kernel.printk = 4 4 1 7
-net.ipv6.conf.all.use_tempaddr = 2
-net.ipv6.conf.default.use_tempaddr = 2
-kernel.kptr_restrict = 1
-kernel.sysrq = 176
-vm.max_map_count = 1048576
-net.ipv4.conf.default.rp_filter = 2
-net.ipv4.conf.all.rp_filter = 2
-kernel.yama.ptrace_scope = 1
-vm.mmap_min_addr = 65536
-kernel.pid_max = 4194304
-vm.max_map_count = 1048576
-fs.protected_fifos = 1
-fs.protected_hardlinks = 1
-fs.protected_regular = 2
-fs.protected_symlinks = 1
-vm.max_map_count = 1048576
-```
-
-</details>
-
 
 Ожидаемое значение:
 
@@ -490,7 +446,7 @@ name: container-security-monitoring
 
 services:
   elasticsearch:
-    image: cr.yandex/mirror/elasticsearch:9.5.5
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5
     container_name: lab-elasticsearch
     restart: unless-stopped
     environment:
@@ -516,7 +472,7 @@ services:
       - monitoring
 
   kibana:
-    image: cr.yandex/mirror/kibana:9.5.5
+    image: docker.elastic.co/kibana/kibana:9.5.5
     container_name: lab-kibana
     restart: unless-stopped
     environment:
@@ -532,7 +488,7 @@ services:
       - monitoring
 
   falcosidekick:
-    image: cr.yandex/mirror/falcosecurity/falcosidekick:2.35.0
+    image: falcosecurity/falcosidekick:2.35.0
     container_name: lab-falcosidekick
     restart: unless-stopped
     environment:
@@ -563,7 +519,7 @@ volumes:
 
 Elasticsearch работает в режиме одного узла, поэтому для индексов Falco создаётся один основной сегмент без резервной копии. Постоянный том сохраняет события после перезапуска контейнера. Ограничения памяти не позволяют компонентам мониторинга занять всю оперативную память лабораторной машины.
 
-Встроенная проверка подлинности Elasticsearch в этом стенде отключена намеренно. Elasticsearch и Falcosidekick доступны только внутри виртуальной машины через порты `9200` и `2801`. Порт Kibana `5601` опубликован на сетевых интерфейсах виртуальной машины, чтобы открыть её с физического компьютера. Поэтому сетевой адаптер стенда должен быть подключён к изолированной сети гипервизора, а не к рабочей локальной сети. Открывать Kibana без проверки подлинности в недоверенной сети нельзя. Такая конфигурация предназначена только для лаборатории и не подходит для промышленной эксплуатации.
+Встроенная проверка подлинности Elasticsearch в этом стенде отключена намеренно. Elasticsearch и Falcosidekick доступны только внутри виртуальной машины через порты `9200` и `2801`. Порт Kibana `5601` опубликован на сетевых интерфейсах виртуальной машины, чтобы открыть её с основной ОС. Сетевой адаптер стенда должен быть подключён к изолированной сети гипервизора, а не к рабочей локальной сети.
 
 Проверим синтаксис файла, загрузим образы и запустим компоненты.
 
@@ -574,7 +530,7 @@ sudo docker compose up -d --wait
 sudo docker compose ps
 ```
 
-В выводе `docker compose ps` Elasticsearch должен иметь состояние `healthy`, а Kibana и Falcosidekick — состояние `running`. Первый запуск может занять несколько минут.
+В выводе `docker compose ps` Elasticsearch должен иметь состояние `healthy`, а Kibana и Falcosidekick - состояние `running`. Первый запуск может занять несколько минут.
 
 Убедимся, что каждый компонент отвечает.
 
@@ -586,7 +542,7 @@ curl -fsS 'http://127.0.0.1:2801/healthz' && \
   echo 'Falcosidekick: OK'
 ```
 
-Elasticsearch должен вернуть сведения о кластере, Kibana — состояние `available`, а проверка Falcosidekick должна завершиться строкой `Falcosidekick: OK`. Если компонент не запустился, посмотрим последние сообщения его контейнера.
+Elasticsearch должен вернуть сведения о кластере, Kibana - состояние `available`, а проверка Falcosidekick должна завершиться строкой `Falcosidekick: OK`. Если компонент не запустился, посмотрим последние сообщения его контейнера.
 
 ```bash
 sudo docker compose logs --tail=100 elasticsearch
@@ -598,9 +554,9 @@ sudo docker compose logs --tail=100 falcosidekick
 
 ```bash
 sudo docker image inspect \
-  cr.yandex/mirror/elasticsearch:9.5.5 \
-  cr.yandex/mirror/kibana:9.5.5 \
-  cr.yandex/mirror/falcosecurity/falcosidekick:2.35.0 \
+  docker.elastic.co/elasticsearch/elasticsearch:9.5.5 \
+  docker.elastic.co/kibana/kibana:9.5.5 \
+  falcosecurity/falcosidekick:2.35.0 \
   --format '{{index .RepoDigests 0}}'
 ```
 
@@ -664,7 +620,7 @@ sudo systemctl --no-pager --full status falco-modern-bpf.service
 Для контрольной проверки запустим интерактивную оболочку в короткоживущем контейнере.
 
 ```bash
-sudo docker run --rm -it cr.yandex/mirror/alpine:3.22 sh
+sudo docker run --rm -it alpine:3.22 sh
 ```
 
 Внутри контейнера выполним `whoami`, а затем завершим оболочку командой `exit`. Стандартное правило Falco должно зафиксировать запуск терминальной оболочки в контейнере. Посмотрим события, полученные после проверки.
@@ -733,6 +689,7 @@ sudo poweroff
 ```
 
 Когда гостевая система полностью остановится, создадим в гипервизоре снимок `lab-ready`. В нём уже будут установлены Docker и Falco, загружены контейнерные образы, сохранена конфигурация мониторинга и проверена передача событий от Falco до Kibana. К этой точке можно возвращаться перед каждым практическим сценарием.
+
 
 
 
