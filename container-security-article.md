@@ -530,6 +530,32 @@ sudo docker compose up -d --wait
 sudo docker compose ps
 ```
 
+<details>
+<summary>Развернуть вывод команды</summary>
+
+  ```bash
+scrock_@scrockcontainers:~/container-security-lab/monitoring$ sudo docker compose pull
+[+] pull 3/3
+ ✔ Image docker.elastic.co/kibana/kibana:9.5.5               Pulled                                                                                                  818.7s
+ ✔ Image falcosecurity/falcosidekick:2.35.0                  Pulled                                                                                                   15.3s
+ ✔ Image docker.elastic.co/elasticsearch/elasticsearch:9.5.5 Pulled                                                                                                  798.8s
+scrock_@scrockcontainers:~/container-security-lab/monitoring$ sudo docker compose up -d --wait
+[+] up 4/5
+[+] up 5/5
+ ✔ Volume container-security-elasticsearch-data Created                                                                                                                0.0s
+ ✔ Container lab-elasticsearch                  Healthy                                                                                                              144.0s
+ ✔ Container lab-kibana                         Healthy                                                                                                              142.9s
+ ✔ Container lab-falcosidekick                  Healthy                                                                                                              142.9s
+scrock_@scrockcontainers:~/container-security-lab/monitoring$ sudo docker compose ps
+NAME                IMAGE                                                 COMMAND                  SERVICE         CREATED         STATUS                   PORTS
+lab-elasticsearch   docker.elastic.co/elasticsearch/elasticsearch:9.5.5   "/bin/tini -- /usr/l…"   elasticsearch   2 minutes ago   Up 2 minutes (healthy)   127.0.0.1:9200->9200/tcp, 9300/tcp
+lab-falcosidekick   falcosecurity/falcosidekick:2.35.0                    "./falcosidekick"        falcosidekick   2 minutes ago   Up 38 seconds            127.0.0.1:2801->2801/tcp
+lab-kibana          docker.elastic.co/kibana/kibana:9.5.5                 "/bin/tini -- /usr/l…"   kibana          2 minutes ago   Up 43 seconds            0.0.0.0:5601->5601/tcp
+scrock_@scrockcontainers:~/container-security-lab/monitoring$  
+```
+
+</details>
+
 В выводе `docker compose ps` Elasticsearch должен иметь состояние `healthy`, а Kibana и Falcosidekick - состояние `running`. Первый запуск может занять несколько минут.
 
 Убедимся, что каждый компонент отвечает.
@@ -542,23 +568,42 @@ curl -fsS 'http://127.0.0.1:2801/healthz' && \
   echo 'Falcosidekick: OK'
 ```
 
-Elasticsearch должен вернуть сведения о кластере, Kibana - состояние `available`, а проверка Falcosidekick должна завершиться строкой `Falcosidekick: OK`. Если компонент не запустился, посмотрим последние сообщения его контейнера.
+<details>
+<summary>Развернуть вывод команды</summary>
 
-```bash
-sudo docker compose logs --tail=100 elasticsearch
-sudo docker compose logs --tail=100 kibana
-sudo docker compose logs --tail=100 falcosidekick
+  ```bash
+scrock_@scrockcontainers:~/container-security-lab/monitoring$ curl -fsS 'http://127.0.0.1:9200/_cluster/health?pretty'                     
+curl -fsS 'http://127.0.0.1:5601/api/status' | \                                                                                           
+  jq -r '.status.overall.level'                                                                                                            
+curl -fsS 'http://127.0.0.1:2801/healthz' && \                                                                                             
+  echo 'Falcosidekick: OK'                                                                                                                 
+{                                                                                                                                          
+  "cluster_name" : "docker-cluster",                                                                                                       
+  "status" : "green",                                                                                                                      
+  "timed_out" : false,                                                                                                                     
+  "number_of_nodes" : 1,                                                                                                                   
+  "number_of_data_nodes" : 1,                                                                                                              
+  "active_primary_shards" : 2,                                                                                                             
+  "active_shards" : 2,                                                                                                                     
+  "relocating_shards" : 0,                                                                                                                                                
+  "initializing_shards" : 0,                                                                                                                                              
+  "unassigned_shards" : 0,                                                                                                                                                
+  "unassigned_primary_shards" : 0,
+  "delayed_unassigned_shards" : 0,
+  "number_of_pending_tasks" : 0,
+  "number_of_in_flight_fetch" : 0,
+  "task_max_waiting_in_queue_millis" : 0,
+  "active_shards_percent_as_number" : 100.0
+}
+
+{"status": "ok"}
+
+Falcosidekick: OK
 ```
 
-После успешной загрузки сохраним фактические идентификаторы образов. Они позволяют проверить, что при повторении стенда используется то же содержимое, даже если содержимое тега в реестре изменится.
+</details>
 
-```bash
-sudo docker image inspect \
-  docker.elastic.co/elasticsearch/elasticsearch:9.5.5 \
-  docker.elastic.co/kibana/kibana:9.5.5 \
-  falcosecurity/falcosidekick:2.35.0 \
-  --format '{{index .RepoDigests 0}}'
-```
+Elasticsearch должен вернуть сведения о кластере, Kibana - состояние `available`, а проверка Falcosidekick должна завершиться строкой `Falcosidekick: OK`. 
 
 #### Проверка передачи событий в Elasticsearch
 
@@ -569,102 +614,389 @@ curl -fsS -X POST 'http://127.0.0.1:2801/test' && \
   echo 'Тестовое событие отправлено'
 ```
 
-Falcosidekick создаёт ежедневные индексы с именами вида `falco-ГГГГ.ММ.ДД`. Проверим появление индекса и количество документов в нём.
+Falcosidekick создаёт ежедневные индексы с именами вида `falco-ГГГГ.ММ.ДД`. Проверим появление индекса и количество документов в нём (если возникает ошибка 503, то необходимо немного подождать создание индекса).
 
 ```bash
 curl -fsS 'http://127.0.0.1:9200/_cat/indices/falco-*?v'
 curl -fsS 'http://127.0.0.1:9200/falco-*/_count?pretty'
 ```
 
-Если индекс не появился, сначала проверим журнал Falcosidekick.
+<details>
+<summary>Развернуть вывод команды</summary>
 
-```bash
-sudo docker compose logs --tail=100 falcosidekick
+  ```bash
+scrock_@scrockcontainers:~/container-security-lab/monitoring$ curl -fsS 'http://127.0.0.1:9200/_cat/indices/falco-*?v'
+health status index            uuid                   pri rep docs.count docs.deleted store.size pri.store.size dataset.size
+yellow open   falco-2026.10.16 H5SotzzoTRCxyeBkflU8rw   1   3          1            0     11.8kb         11.8kb       11.8kb
+scrock_@scrockcontainers:~/container-security-lab/monitoring$ curl -fsS 'http://127.0.0.1:9200/falco-*/_count?pretty'
+{
+  "count" : 1,
+  "_shards" : {
+    "total" : 1,
+    "successful" : 1,
+    "skipped" : 0,
+    "failed" : 0
+  }
+}
 ```
+
+</details>
 
 #### Подключение Falco
 
-Теперь направим в Falcosidekick настоящие уведомления Falco. Сначала сохраним исходную конфигурацию.
+Falcosidekick уже умеет записывать события в Elasticsearch. Теперь направим в него уведомления, которые создаёт Falco при срабатывании правил.
+
+Основной файл `/etc/falco/falco.yaml` изменять не будем. Начиная с версии 0.38, Falco поддерживает [дополнительные файлы конфигурации](https://falco.org/docs/configuration/#config_files) в каталоге `/etc/falco/config.d`. Они загружаются после основного файла и могут переопределять его параметры. Такой способ упрощает обновление пакета и позволяет хранить локальные изменения отдельно.
+
+Создадим файл настроек для подключения к Falcosidekick.
 
 ```bash
-sudo cp --no-clobber \
-  /etc/falco/falco.yaml \
-  /etc/falco/falco.yaml.before-falcosidekick
-sudoedit /etc/falco/falco.yaml
-```
+sudo install -d -m 0755 /etc/falco/config.d
 
-В существующем файле найдём указанные параметры и приведём их к следующему виду. Добавлять второй блок `http_output` не нужно.
-
-```yaml
+sudo tee /etc/falco/config.d/99-falcosidekick.yaml \
+  >/dev/null <<'EOF'
 json_output: true
 json_include_output_property: true
 
 http_output:
   enabled: true
   url: "http://127.0.0.1:2801/"
+EOF
 ```
 
-Falco будет формировать уведомления в формате JSON и отправлять их на локальный порт Falcosidekick. Проверим конфигурацию до перезапуска службы.
+Параметр `json_output` переводит уведомления Falco в формат JSON. Параметр `json_include_output_property` сохраняет в них готовое текстовое описание события. Блок `http_output` включает передачу уведомлений по протоколу HTTP на локальный порт Falcosidekick.
+
+Проверим итоговую конфигурацию до перезапуска службы.
 
 ```bash
 sudo falco --dry-run
 ```
 
-Если проверка не обнаружила ошибок, перезапустим службу с современным драйвером eBPF и посмотрим её состояние.
+<details>
+<summary>Развернуть вывод команды</summary>
+
+  ```bash
+scrock_@scrockcontainers:~/container-security-lab/monitoring$ sudo falco --dry-run
+Fri Oct 16 22:57:04 2026: Falco version: 0.45.0 (x86_64)
+Fri Oct 16 22:57:04 2026: Falco initialized with configuration files:
+Fri Oct 16 22:57:04 2026:    /etc/falco/config.d/99-falcosidekick.yaml | schema validation: ok
+Fri Oct 16 22:57:04 2026:    /etc/falco/config.d/engine-kind-falcoctl.yaml | schema validation: ok
+Fri Oct 16 22:57:04 2026:    /etc/falco/config.d/falco.container_plugin.yaml | schema validation: ok
+Fri Oct 16 22:57:04 2026:    /etc/falco/falco.yaml | schema validation: ok
+Fri Oct 16 22:57:04 2026: System info: Linux version 6.8.0-147-generic (buildd@lcy02-amd64-081) (x86_64-linux-gnu-gcc-13 (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, GNU ld (GNU Binutils for Ubuntu) 2.42) #147-Ubuntu SMP PREEMPT_DYNAMIC Thu Sep 24 11:33:16 UTC 2026
+Fri Oct 16 22:57:04 2026: Loaded plugin 'container@0.7.4' from file /usr/share/falco/plugins/libcontainer.so
+Fri Oct 16 22:57:04 2026: [libs]: container: Enabled 'podman' container engine.
+Fri Oct 16 22:57:04 2026: [libs]: container: * enabled container runtime socket at '/run/podman/podman.sock'
+Fri Oct 16 22:57:04 2026: [libs]: container: Enabled 'docker' container engine.
+Fri Oct 16 22:57:04 2026: [libs]: container: * enabled container runtime socket at '/var/run/docker.sock'
+Fri Oct 16 22:57:04 2026: [libs]: container: Enabled 'cri' container engine.
+Fri Oct 16 22:57:04 2026: [libs]: container: * enabled container runtime socket at '/run/containerd/containerd.sock'
+Fri Oct 16 22:57:04 2026: [libs]: container: * enabled container runtime socket at '/run/crio/crio.sock'
+Fri Oct 16 22:57:04 2026: [libs]: container: * enabled container runtime socket at '/run/k3s/containerd/containerd.sock'
+Fri Oct 16 22:57:04 2026: [libs]: container: * enabled container runtime socket at '/run/host-containerd/containerd.sock'
+Fri Oct 16 22:57:04 2026: [libs]: container: Enabled 'containerd' container engine.
+Fri Oct 16 22:57:04 2026: [libs]: container: * enabled container runtime socket at '/run/host-containerd/containerd.sock'
+Fri Oct 16 22:57:04 2026: [libs]: container: Enabled 'lxc' container engine.
+Fri Oct 16 22:57:04 2026: [libs]: container: Enabled 'libvirt_lxc' container engine.
+Fri Oct 16 22:57:04 2026: [libs]: container: Enabled 'bpm' container engine.
+Fri Oct 16 22:57:04 2026: Loading rules from:
+Fri Oct 16 22:57:06 2026:    /etc/falco/falco_rules.yaml | schema validation: ok
+Fri Oct 16 22:57:06 2026:    /etc/falco/falco_rules.local.yaml | schema validation: none
+Fri Oct 16 22:57:06 2026: The chosen syscall buffer dimension is: 8388608 bytes (8 MBs)
+```
+
+</details>
+
+При успешной проверке Falco завершит команду с кодом `0` и не выведет сообщение об ошибке конфигурации. После этого перезапустим службу с современным драйвером eBPF и проверим её состояние.
 
 ```bash
 sudo systemctl restart falco-modern-bpf.service
-sudo systemctl --no-pager --full status falco-modern-bpf.service
+
+sudo systemctl --no-pager --full \
+  status falco-modern-bpf.service
 ```
+
+<details>
+<summary>Развернуть вывод команды</summary>
+
+  ```bash
+scrock_@scrockcontainers:~/container-security-lab/monitoring$ sudo systemctl restart falco-modern-bpf.service
+scrock_@scrockcontainers:~/container-security-lab/monitoring$ sudo systemctl --no-pager --full \
+  status falco-modern-bpf.service
+● falco-modern-bpf.service - Falco: Container Native Runtime Security with modern ebpf
+     Loaded: loaded (/usr/lib/systemd/system/falco-modern-bpf.service; enabled; preset: enabled)
+     Active: active (running) since Fri 2026-10-16 22:57:45 UTC; 3s ago
+       Docs: https://falco.org/docs/
+   Main PID: 9185 (falco)
+      Tasks: 20 (limit: 13913)
+     Memory: 54.4M (peak: 54.4M)
+        CPU: 4.434s
+     CGroup: /system.slice/falco-modern-bpf.service
+             └─9185 /usr/bin/falco -o engine.kind=modern_ebpf
+
+Oct 16 22:57:45 scrockcontainers falco[9185]: Loading rules from:
+Oct 16 22:57:47 scrockcontainers falco[9185]:    /etc/falco/falco_rules.yaml | schema validation: ok
+Oct 16 22:57:47 scrockcontainers falco[9185]:    /etc/falco/falco_rules.local.yaml | schema validation: none
+Oct 16 22:57:47 scrockcontainers falco[9185]: The chosen syscall buffer dimension is: 8388608 bytes (8 MBs)
+Oct 16 22:57:47 scrockcontainers falco[9185]: Starting health webserver with threadiness 6, listening on 0.0.0.0:8765
+Oct 16 22:57:47 scrockcontainers falco[9185]: Loaded event sources: syscall
+Oct 16 22:57:47 scrockcontainers falco[9185]: Enabled event sources: syscall
+Oct 16 22:57:47 scrockcontainers falco[9185]: Opening 'syscall' source with modern BPF probe.
+Oct 16 22:57:47 scrockcontainers falco[9185]: One ring buffer every '2' CPUs.
+Oct 16 22:57:47 scrockcontainers falco[9185]: [libs]: Trying to open the right engine!
+```
+
+</details>
+
+Служба должна находиться в состоянии `active (running)`. Убедимся, что после запуска в журнале нет ошибок отправки по HTTP.
+
+```bash
+sudo journalctl \
+  -u falco-modern-bpf.service \
+  -n 50 \
+  --no-pager
+```
+
+<details>
+<summary>Развернуть вывод команды</summary>
+
+  ```bash
+scrock_@scrockcontainers:~/container-security-lab/monitoring$ sudo journalctl \
+  -u falco-modern-bpf.service \
+  -n 50 \
+  --no-pager
+Oct 16 22:56:57 scrockcontainers falco[3138]: [libs]: container: Enabled 'libvirt_lxc' container engine.
+Oct 16 22:56:57 scrockcontainers falco[3138]: [libs]: container: Enabled 'bpm' container engine.
+Oct 16 22:56:57 scrockcontainers falco[3138]: Loading rules from:
+Oct 16 22:56:57 scrockcontainers falco[3138]:    /etc/falco/falco_rules.yaml | schema validation: ok
+Oct 16 22:56:57 scrockcontainers falco[3138]:    /etc/falco/falco_rules.local.yaml | schema validation: none
+Oct 16 22:56:57 scrockcontainers falco[3138]: The chosen syscall buffer dimension is: 8388608 bytes (8 MBs)
+Oct 16 22:56:57 scrockcontainers falco[3138]: Starting health webserver with threadiness 6, listening on 0.0.0.0:8765
+Oct 16 22:56:57 scrockcontainers falco[3138]: Loaded event sources: syscall
+Oct 16 22:56:57 scrockcontainers falco[3138]: Enabled event sources: syscall
+Oct 16 22:56:57 scrockcontainers falco[3138]: Opening 'syscall' source with modern BPF probe.
+Oct 16 22:56:57 scrockcontainers falco[3138]: One ring buffer every '2' CPUs.
+Oct 16 22:56:57 scrockcontainers falco[3138]: [libs]: Trying to open the right engine!
+Oct 16 22:57:43 scrockcontainers falco[3138]: SIGINT received, exiting...
+Oct 16 22:57:43 scrockcontainers systemd[1]: Stopping falco-modern-bpf.service - Falco: Container Native Runtime Security with modern ebpf...
+Oct 16 22:57:45 scrockcontainers systemd[1]: falco-modern-bpf.service: Deactivated successfully.
+Oct 16 22:57:45 scrockcontainers systemd[1]: Stopped falco-modern-bpf.service - Falco: Container Native Runtime Security with modern ebpf.
+Oct 16 22:57:45 scrockcontainers systemd[1]: falco-modern-bpf.service: Consumed 3min 20.067s CPU time, 81.5M memory peak, 0B memory swap peak.
+Oct 16 22:57:45 scrockcontainers systemd[1]: Started falco-modern-bpf.service - Falco: Container Native Runtime Security with modern ebpf.
+Oct 16 22:57:45 scrockcontainers falco[9185]: Falco version: 0.45.0 (x86_64)
+Oct 16 22:57:45 scrockcontainers falco[9185]: Falco initialized with configuration files:
+Oct 16 22:57:45 scrockcontainers falco[9185]:    /etc/falco/config.d/99-falcosidekick.yaml | schema validation: ok
+Oct 16 22:57:45 scrockcontainers falco[9185]:    /etc/falco/config.d/engine-kind-falcoctl.yaml | schema validation: ok
+Oct 16 22:57:45 scrockcontainers falco[9185]:    /etc/falco/config.d/falco.container_plugin.yaml | schema validation: ok
+Oct 16 22:57:45 scrockcontainers falco[9185]:    /etc/falco/falco.yaml | schema validation: ok
+Oct 16 22:57:45 scrockcontainers falco[9185]: System info: Linux version 6.8.0-147-generic (buildd@lcy02-amd64-081) (x86_64-linux-gnu-gcc-13 (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, GNU ld (GNU Binutils for Ubuntu) 2.42) #147-Ubuntu SMP PREEMPT_DYNAMIC Thu Sep 24 11:33:16 UTC 2026
+Oct 16 22:57:45 scrockcontainers falco[9185]: Loaded plugin 'container@0.7.4' from file /usr/share/falco/plugins/libcontainer.so
+Oct 16 22:57:45 scrockcontainers falco[9185]: [libs]: container: Enabled 'podman' container engine.
+Oct 16 22:57:45 scrockcontainers falco[9185]: [libs]: container: * enabled container runtime socket at '/run/podman/podman.sock'
+Oct 16 22:57:45 scrockcontainers falco[9185]: [libs]: container: Enabled 'docker' container engine.
+Oct 16 22:57:45 scrockcontainers falco[9185]: [libs]: container: * enabled container runtime socket at '/var/run/docker.sock'
+Oct 16 22:57:45 scrockcontainers falco[9185]: [libs]: container: Enabled 'cri' container engine.
+Oct 16 22:57:45 scrockcontainers falco[9185]: [libs]: container: * enabled container runtime socket at '/run/containerd/containerd.sock'
+Oct 16 22:57:45 scrockcontainers falco[9185]: [libs]: container: * enabled container runtime socket at '/run/crio/crio.sock'
+Oct 16 22:57:45 scrockcontainers falco[9185]: [libs]: container: * enabled container runtime socket at '/run/k3s/containerd/containerd.sock'
+Oct 16 22:57:45 scrockcontainers falco[9185]: [libs]: container: * enabled container runtime socket at '/run/host-containerd/containerd.sock'
+Oct 16 22:57:45 scrockcontainers falco[9185]: [libs]: container: Enabled 'containerd' container engine.
+Oct 16 22:57:45 scrockcontainers falco[9185]: [libs]: container: * enabled container runtime socket at '/run/host-containerd/containerd.sock'
+Oct 16 22:57:45 scrockcontainers falco[9185]: [libs]: container: Enabled 'lxc' container engine.
+Oct 16 22:57:45 scrockcontainers falco[9185]: [libs]: container: Enabled 'libvirt_lxc' container engine.
+Oct 16 22:57:45 scrockcontainers falco[9185]: [libs]: container: Enabled 'bpm' container engine.
+Oct 16 22:57:45 scrockcontainers falco[9185]: Loading rules from:
+Oct 16 22:57:47 scrockcontainers falco[9185]:    /etc/falco/falco_rules.yaml | schema validation: ok
+Oct 16 22:57:47 scrockcontainers falco[9185]:    /etc/falco/falco_rules.local.yaml | schema validation: none
+Oct 16 22:57:47 scrockcontainers falco[9185]: The chosen syscall buffer dimension is: 8388608 bytes (8 MBs)
+Oct 16 22:57:47 scrockcontainers falco[9185]: Starting health webserver with threadiness 6, listening on 0.0.0.0:8765
+Oct 16 22:57:47 scrockcontainers falco[9185]: Loaded event sources: syscall
+Oct 16 22:57:47 scrockcontainers falco[9185]: Enabled event sources: syscall
+Oct 16 22:57:47 scrockcontainers falco[9185]: Opening 'syscall' source with modern BPF probe.
+Oct 16 22:57:47 scrockcontainers falco[9185]: One ring buffer every '2' CPUs.
+Oct 16 22:57:47 scrockcontainers falco[9185]: [libs]: Trying to open the right engine!
+```
+
+</details>
 
 Для контрольной проверки запустим интерактивную оболочку в короткоживущем контейнере.
 
 ```bash
-sudo docker run --rm -it alpine:3.22 sh
+sudo docker run \
+  --rm \
+  --interactive \
+  --tty \
+  --name falco-shell-test \
+  alpine:3.22 sh
 ```
 
-Внутри контейнера выполним `whoami`, а затем завершим оболочку командой `exit`. Стандартное правило Falco должно зафиксировать запуск терминальной оболочки в контейнере. Посмотрим события, полученные после проверки.
+Внутри контейнера выполним две команды.
+
+```sh
+whoami
+exit
+```
+
+Событие создаёт не команда `whoami`, а запуск оболочки `sh` с подключённым терминалом. Этому действию соответствует штатное правило Falco [`Terminal shell in container`](https://github.com/falcosecurity/rules/blob/main/rules/falco_rules.yaml).
+
+Проверим, что правило сработало на узле.
 
 ```bash
 sudo journalctl \
   -u falco-modern-bpf.service \
   --since '2 minutes ago' \
-  --no-pager
-
-curl -fsS 'http://127.0.0.1:9200/falco-*/_count?pretty'
+  --no-pager | \
+  grep -F 'Terminal shell in container'
 ```
 
-В журнале Falco и в индексе Elasticsearch должно появиться новое событие. Так мы отдельно проверили оба участка цепочки — передачу от Falco к Falcosidekick и запись из Falcosidekick в Elasticsearch.
+<details>
+<summary>Развернуть вывод команды</summary>
 
-#### Просмотр событий в Kibana
+  ```bash
+scrock_@scrockcontainers:~/container-security-lab/monitoring$ sudo journalctl \
+  -u falco-modern-bpf.service \
+  --since '2 minutes ago' \
+  --no-pager | \
+  grep -F 'Terminal shell in container'
+Oct 16 22:59:26 scrockcontainers falco[9185]: {"hostname":"scrockcontainers","output":"22:59:26.058254401: Notice A shell was spawned in a container with an attached terminal | evt_type=execve user=root user_uid=0 user_loginuid=-1 process=sh proc_exepath=/bin/busybox parent=containerd-shim command=sh terminal=34816 exe_flags=EXE_WRITABLE|EXE_LOWER_LAYER container_id=f8187887e087 container_name=falco-shell-test container_image_repository=alpine container_image_tag=3.22 k8s_pod_name=<NA> k8s_ns_name=<NA>","output_fields":{"container.id":"f8187887e087","container.image.repository":"alpine","container.image.tag":"3.22","container.name":"falco-shell-test","evt.arg.flags":"EXE_WRITABLE|EXE_LOWER_LAYER","evt.time":1792191566058254401,"evt.type":"execve","k8s.ns.name":null,"k8s.pod.name":null,"proc.cmdline":"sh","proc.exepath":"/bin/busybox","proc.name":"sh","proc.pname":"containerd-shim","proc.tty":34816,"user.loginuid":-1,"user.name":"root","user.uid":0},"priority":"Notice","rule":"Terminal shell in container","source":"syscall","tags":["T1059","container","maturity_stable","mitre_execution","shell"],"time":"2026-10-16T22:59:26.058254401Z"}
+```
 
-Узнаем адрес виртуальной машины в изолированной сети гипервизора.
+</details>
+
+Доставка в Elasticsearch выполняется асинхронно, поэтому документ может появиться не сразу.
 
 ```bash
-ip -br address
+  curl -fsS -X POST \
+    'http://127.0.0.1:9200/falco-*/_search' \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "size": 0,
+      "query": {
+        "match_phrase": {
+          "rule": "Terminal shell in container"
+        }
+      }
+    }' | jq '.hits.total.value'
 ```
 
-С физического компьютера откроем в браузере адрес `http://<адрес_виртуальной_машины>:5601`. Например, если лабораторный интерфейс получил адрес `192.168.56.10`, Kibana будет доступна по адресу `http://192.168.56.10:5601`.
+Если событие дошло до elastic, то команда выведет `1`.
 
-После появления первого события создадим [представление данных](https://www.elastic.co/docs/explore-analyze/find-and-organize/data-views/create-data-view), которое свяжет интерфейс Kibana с индексами Falco.
+Выведем последнее найденное событие.
 
 ```bash
 curl -fsS -X POST \
-  'http://127.0.0.1:5601/api/data_views/data_view' \
-  -H 'kbn-xsrf: true' \
+  'http://127.0.0.1:9200/falco-*/_search?pretty' \
   -H 'Content-Type: application/json' \
   -d '{
-    "data_view": {
-      "id": "falco-events",
-      "name": "Falco events",
-      "title": "falco-*",
-      "timeFieldName": "time"
+    "size": 1,
+    "sort": [
+      {
+        "time": {
+          "order": "desc"
+        }
+      }
+    ],
+    "query": {
+      "match_phrase": {
+        "rule": "Terminal shell in container"
+      }
     },
-    "override": true
-  }' | jq
+    "_source": [
+      "time",
+      "rule",
+      "priority",
+      "output"
+    ]
+  }'
 ```
 
-В разделе `Discover` выберем представление `Falco events`. В нём должны отображаться как служебная проверка Falcosidekick, так и уведомление, созданное после запуска оболочки в контейнере.
+<details>
+<summary>Развернуть вывод команды</summary>
+
+  ```bash
+scrock_@scrockcontainers:~/container-security-lab/monitoring$ curl -fsS -X POST \
+  'http://127.0.0.1:9200/falco-*/_search?pretty' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "size": 1,
+    "sort": [
+      {
+        "time": {
+          "order": "desc"
+        }
+      }
+    ],
+    "query": {
+      "match_phrase": {
+        "rule": "Terminal shell in container"
+      }
+    },
+    "_source": [
+      "time",
+      "rule",
+      "priority",
+      "output"
+    ]
+  }'
+{
+  "took" : 6,
+  "timed_out" : false,
+  "_shards" : {
+    "total" : 1,
+    "successful" : 1,
+    "skipped" : 0,
+    "failed" : 0
+  },
+  "hits" : {
+    "total" : {
+      "value" : 1,
+      "relation" : "eq"
+    },
+    "max_score" : null,
+    "hits" : [
+      {
+        "_index" : "falco-2026.10.16",
+        "_id" : "ms_xRqEBa3Eq3AZzEeqd",
+        "_score" : null,
+        "_source" : {
+          "output" : "22:59:26.058254401: Notice A shell was spawned in a container with an attached terminal | evt_type=execve user=root user_uid=0 user_loginuid=-1 process=sh proc_exepath=/bin/busybox parent=containerd-shim command=sh terminal=34816 exe_flags=EXE_WRITABLE|EXE_LOWER_LAYER container_id=f8187887e087 container_name=falco-shell-test container_image_repository=alpine container_image_tag=3.22 k8s_pod_name=<NA> k8s_ns_name=<NA>",
+          "priority" : "Notice",
+          "rule" : "Terminal shell in container",
+          "time" : "2026-10-16T22:59:26.058254401Z"
+        },
+        "sort" : [
+          1792191566058
+        ]
+      }
+    ]
+  }
+}
+```
+
+</details>
+
+В ответе Elasticsearch должно находиться событие с правилом `Terminal shell in container`. Его наличие одновременно в журнале Falco и в индексе `falco-*` подтверждает работу всей цепочки от события ядра до сохранённого документа.
+
+
+#### Просмотр событий в Kibana
+
+С физического компьютера откроем в браузере адрес `http://<адрес_виртуальной_машины>:5601`. Например, если лабораторный интерфейс получил адрес `192.168.0.69`, Kibana будет доступна по адресу `http://192.168.0.69:5601`. В лабораторной конфигурации проверка подлинности Elastic Stack отключена, поэтому для входа в Kibana имя пользователя и пароль не требуются.
+
+После появления первого события создадим [представление данных](https://www.elastic.co/docs/explore-analyze/find-and-organize/data-views/create-data-view). Оно укажет Kibana, из каких индексов брать события и какое поле использовать для фильтрации по времени. Само представление не копирует данные и не создаёт новый индекс.
+
+Откроем Kibana по адресу `http://<адрес_виртуальной_машины>:5601` и выполним следующие действия.
+
+1. Через глобальный поиск откроем раздел `Data Views`.
+![Создание data-view](./images/elastic-data-view-1.png)
+2. Нажмём `Create data view`.
+3. В поле `Name` укажем `Falco events`.
+4. В поле `Index pattern` укажем `falco-*`.
+5. В качестве поля времени (`Timestamp field`) выберем `time`.
+6. Нажмём `Save data view to Kibana`.
+![Создание data-view](./images/elastic-data-view-2.png)
+
+После сохранения откроем раздел `Discover` и выберем представление `Falco events`. В нём должны отображаться тестовое событие Falcosidekick и уведомление о запуске интерактивной оболочки в контейнере.
+
 
 #### Контрольная точка `lab-ready`
 
@@ -680,15 +1012,63 @@ curl -fsS 'http://127.0.0.1:5601/api/status' | \
   jq -r '.status.overall.level'
 ```
 
-Docker и Falco должны иметь состояние `active`, контейнеры должны быть запущены, Elasticsearch должен отвечать, в индексе должен находиться хотя бы один документ, а состояние Kibana должно быть `available`.
+<details>
+<summary>Развернуть вывод команды</summary>
 
-После проверки корректно выключим виртуальную машину.
-
-```bash
-sudo poweroff
+  ```bash
+scrock_@scrockcontainers:~/container-security-lab/monitoring$ sudo systemctl is-active docker
+active
+scrock_@scrockcontainers:~/container-security-lab/monitoring$ sudo systemctl is-active falco-modern-bpf.service
+active
+scrock_@scrockcontainers:~/container-security-lab/monitoring$ sudo docker compose ps
+NAME                IMAGE                                                 COMMAND                  SERVICE         CREATED          STATUS                    PORTS
+lab-elasticsearch   docker.elastic.co/elasticsearch/elasticsearch:9.5.5   "/bin/tini -- /usr/l…"   elasticsearch   30 minutes ago   Up 30 minutes (healthy)   127.0.0.1:9200->9200/tcp, 9300/tcp
+lab-falcosidekick   falcosecurity/falcosidekick:2.35.0                    "./falcosidekick"        falcosidekick   30 minutes ago   Up 28 minutes             127.0.0.1:2801->2801/tcp
+lab-kibana          docker.elastic.co/kibana/kibana:9.5.5                 "/bin/tini -- /usr/l…"   kibana          30 minutes ago   Up 28 minutes             0.0.0.0:5601->5601/tcp
+scrock_@scrockcontainers:~/container-security-lab/monitoring$ curl -fsS 'http://127.0.0.1:9200/_cluster/health?pretty'
+{
+  "cluster_name" : "docker-cluster",
+  "status" : "yellow",
+  "timed_out" : false,
+  "number_of_nodes" : 1,
+  "number_of_data_nodes" : 1,
+  "active_primary_shards" : 35,
+  "active_shards" : 35,
+  "relocating_shards" : 0,
+  "initializing_shards" : 0,
+  "unassigned_shards" : 3,
+  "unassigned_primary_shards" : 0,
+  "delayed_unassigned_shards" : 0,
+  "number_of_pending_tasks" : 0,
+  "number_of_in_flight_fetch" : 0,
+  "task_max_waiting_in_queue_millis" : 0,
+  "active_shards_percent_as_number" : 92.10526315789474
+}
+scrock_@scrockcontainers:~/container-security-lab/monitoring$ curl -fsS 'http://127.0.0.1:9200/falco-*/_count?pretty'
+{
+  "count" : 2,
+  "_shards" : {
+    "total" : 1,
+    "successful" : 1,
+    "skipped" : 0,
+    "failed" : 0
+  }
+}
+scrock_@scrockcontainers:~/container-security-lab/monitoring$ curl -fsS 'http://127.0.0.1:5601/api/status' | \
+  jq -r '.status.overall.level'
+available
+scrock_@scrockcontainers:~/container-security-lab/monitoring$ 
 ```
 
+</details>
+
+Docker и Falco должны иметь состояние `active`, контейнеры должны быть запущены, Elasticsearch должен отвечать, в индексе должен находиться хотя бы один документ, а состояние Kibana должно быть `available`.
+
 Когда гостевая система полностью остановится, создадим в гипервизоре снимок `lab-ready`. В нём уже будут установлены Docker и Falco, загружены контейнерные образы, сохранена конфигурация мониторинга и проверена передача событий от Falco до Kibana. К этой точке можно возвращаться перед каждым практическим сценарием.
+
+
+
+
 
 
 
