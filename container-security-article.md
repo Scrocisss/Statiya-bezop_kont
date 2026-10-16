@@ -170,7 +170,8 @@ uname -a && stat -fc %T /sys/fs/cgroup && findmnt -t cgroup2
 
 <details>
 <summary>Развернуть вывод команды</summary>
-```text
+
+  ```bash
 Linux scrockcontainers 6.8.0-147-generic #147-Ubuntu SMP PREEMPT_DYNAMIC Thu
 Sep 24 11:33:16 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
 
@@ -182,6 +183,7 @@ TARGET        SOURCE FSTYPE OPTIONS
                      cgroup
                      rw,nosuid,nodev,noexec,relatime,nsdelegate,memory_r
 ```
+
 </details>
 
 
