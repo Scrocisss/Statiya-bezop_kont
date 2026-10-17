@@ -2090,6 +2090,52 @@ and output_fields.container_name : "lab-command-injection"
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ## Основные источники
 
 ### Linux
