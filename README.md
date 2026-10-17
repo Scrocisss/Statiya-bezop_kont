@@ -2048,7 +2048,7 @@ sudo journalctl \
 ```
 
 <details>
-<summary>Развернуть событие</summary>
+<summary>Развернуть вывод команды</summary>
 
   ```bash
 2026-10-17T18:33:02.813927386Z  id      python  docker-init     id      10001 lab-command-injection
@@ -2387,7 +2387,7 @@ sudo docker image inspect container-security-lab/writable-bind-mount:1.0-vulnera
 ```
 
 <details>
-<summary>Развернуть событие</summary>
+<summary>Развернуть вывод команды</summary>
 
   ```bash
 scrock_@scrockcontainers:~/container-security-lab/scenarios/02-writable-bind-mount$ sudo docker image inspect container-security-lab/writable-bind-mount:1.0-vulnerable --format 'id={{.Id}} arch={{.Architecture}} user={{.Config.User}} size={{.Size}} practice={{index .Config.Labels "io.container-security-lab.practice"}} variant={{index .Config.Labels "io.container-security-lab.variant"}}'
@@ -2434,7 +2434,7 @@ sudo sha256sum /srv/container-security-lab/practice-02/host-marker.txt
 ```
 
 <details>
-<summary>Развернуть событие</summary>
+<summary>Развернуть вывод команды</summary>
 
   ```bash
 scrock_@scrockcontainers:~/container-security-lab/scenarios/02-writable-bind-mount$ sudo cat /srv/container-security-lab/practice-02/host-marker.txt
@@ -2567,7 +2567,7 @@ sudo docker exec lab-writable-bind-mount cat /mnt/host-data/host-marker.txt
 ```
 
 <details>
-<summary>Развернуть событие</summary>
+<summary>Развернуть вывод команды</summary>
 
   ```bash
 scrock_@scrockcontainers:~/container-security-lab/scenarios/02-writable-bind-mount$ sudo docker exec lab-writable-bind-mount id
@@ -2581,40 +2581,51 @@ state=original
 
 </details>
 
-
 Номер inode внутри контейнера должен совпасть с номером, полученным командой `stat` на хосте. Это прямое подтверждение того, что обе стороны обращаются к одному объекту.
-
-> **ПРИШЛИТЕ ВЫВОД № 3.** Нужны `docker compose ps`, JSON из `docker inspect`, результат `id` и обе проверки файла из контейнера.
 
 ### Штатный запрос
 
 Сначала выполним обычную проверку адреса:
 
 ```bash
-curl --fail --silent --show-error \
-  --get \
-  --data-urlencode 'host=127.0.0.1' \
-  'http://127.0.0.1:8080/ping' | jq
+http://192.168.0.69:8080/ping?host=127.0.0.1
 ```
 
 После неё файл хоста не должен измениться:
 
 ```bash
-sudo sha256sum \
-  /srv/container-security-lab/practice-02/host-marker.txt
+sudo cat /srv/container-security-lab/practice-02/host-marker.txt
 ```
 
-Ожидается исходная сумма `525c7030...c77838`. Этот запрос станет отрицательным тестом для будущего правила файловой записи.
+<details>
+<summary>Развернуть вывод команды</summary>
+
+  ```bash
+scrock_@scrockcontainers:~/container-security-lab/scenarios/02-writable-bind-mount$ sudo cat /srv/container-security-lab/practice-02/host-marker.txt
+owner=host
+state=original
+```
+
+</details>
 
 ### Чтение файла через подключённый каталог
 
 Сначала посмотрим, способен ли скомпрометированный процесс прочитать ресурс хоста:
 
-```bash
-curl --fail --silent --show-error \
-  --get \
-  --data-urlencode 'host=127.0.0.1; cat /mnt/host-data/host-marker.txt' \
-  'http://127.0.0.1:8080/ping' | jq
+```text
+http://192.168.0.69:8080/ping?host=127.0.0.1%3B%20cat%20%2Fmnt%2Fhost-data%2Fhost-marker.txt
+```
+
+Адрес содержит значение параметра `host`, закодированное по [правилам URL](https://www.rfc-editor.org/rfc/rfc3986.html#section-2.1):
+
+- `%3B` - точка с запятой `;`, разделяющая команды оболочки;
+- `%20` - пробел;
+- `%2F` - символ `/` в пути к файлу.
+
+После разбора HTTP-запроса приложение декодирует параметр и получает исходную строку:
+
+```text
+192.168.0.69; cat /mnt/host-data/host-marker.txt
 ```
 
 В поле `stdout` после результата `ping` должны появиться строки:
@@ -2624,19 +2635,16 @@ owner=host
 state=original
 ```
 
-Так мы подтверждаем нарушение границы конфиденциальности. Право только на чтение уже может раскрыть конфигурацию, токены, резервные копии или данные другого приложения. Однако основной объект этой практики — изменение файла, поэтому окончательное правило будет контролировать успешную запись.
+Так мы подтверждаем нарушение границы конфиденциальности. Право только на чтение уже может раскрыть конфигурацию, токены, резервные копии или данные другого приложения. Однако основной объект этой практики - изменение файла, поэтому окончательное правило будет контролировать успешную запись.
 
-Команда `cat` является отдельным процессом и может вызвать правило из первой практики. Это полезная корреляция, но она не заменяет файловый детект: запись можно выполнить встроенной командой оболочки без запуска `cat`.
+Команда `cat` является отдельным процессом и может вызвать правило из первой практики. Это полезная корреляция, но она не заменяет файловый детект, запись можно выполнить встроенной командой оболочки без запуска `cat`.
 
 ### Изменение файла хоста
 
 Для проверки целостности используем встроенную команду оболочки `printf` и перенаправление `>`:
 
 ```bash
-curl --fail --silent --show-error \
-  --get \
-  --data-urlencode 'host=127.0.0.1; printf "owner=host\nstate=modified-by-container\n" > /mnt/host-data/host-marker.txt' \
-  'http://127.0.0.1:8080/ping' | jq
+http://192.168.0.69:8080/ping?host=127.0.0.1%3B%20printf%20%22owner%3Dhost%5Cnstate%3Dmodified-by-container%5Cn%22%20%3E%20%2Fmnt%2Fhost-data%2Fhost-marker.txt
 ```
 
 При успешной записи поле `returncode` будет равно `0`, а `stderr` останется пустым. `printf` в BusyBox `sh` является встроенной командой, поэтому для неё может не появиться отдельный процесс `printf`. Файл открывает для записи сама оболочка. Это показывает, почему правила запуска процессов недостаточно для контроля файловой целостности.
@@ -2644,16 +2652,23 @@ curl --fail --silent --show-error \
 Проверим файл непосредственно на хосте:
 
 ```bash
-sudo cat \
-  /srv/container-security-lab/practice-02/host-marker.txt
-
-sudo stat \
-  --format='inode=%i owner=%U(%u) group=%G(%g) mode=%A(%a) size=%s mtime=%y' \
-  /srv/container-security-lab/practice-02/host-marker.txt
-
-sudo sha256sum \
-  /srv/container-security-lab/practice-02/host-marker.txt
+sudo cat /srv/container-security-lab/practice-02/host-marker.txt
+sudo stat --format='inode=%i owner=%U(%u) group=%G(%g) mode=%A(%a) size=%s mtime=%y' /srv/container-security-lab/practice-02/host-marker.txt
+sudo sha256sum /srv/container-security-lab/practice-02/host-marker.txt
 ```
+
+<details>
+<summary>Развернуть вывод команды</summary>
+
+  ```bash
+scrock_@scrockcontainers:~/container-security-lab/scenarios/02-writable-bind-mount$ sudo cat /srv/container-security-lab/practice-02/host-marker.txt
+owner=host
+state=modified-by-container
+scrock_@scrockcontainers:~/container-security-lab/scenarios/02-writable-bind-mount$ sudo stat --format='inode=%i owner=%U(%u) group=%G(%g) mode=%A(%a) size=%s mtime=%y' /srv/container-security-lab/practice-02/host-marker.txt
+inode=1441797 owner=UNKNOWN(10001) group=UNKNOWN(10001) mode=-rw-r-----(640) size=39 mtime=2026-10-17 21:28:17.445514933 +0000
+```
+
+</details>
 
 Ожидаемое содержимое:
 
@@ -2662,15 +2677,7 @@ owner=host
 state=modified-by-container
 ```
 
-Контрольная сумма такого файла:
-
-```text
-26f98559970a8433c79e9572700f780d4a5003c26291d5180d96ba6e4a1602e2
-```
-
 Если inode остался прежним, а содержимое, размер, время изменения и контрольная сумма поменялись, контейнер действительно перезаписал исходный объект хоста.
-
-> **ПРИШЛИТЕ ВЫВОД № 4.** Нужны JSON-ответ атакующего HTTP-запроса и результаты `cat`, `stat`, `sha256sum` на хосте после записи.
 
 ### Что уже доказано
 
@@ -2687,12 +2694,7 @@ state=modified-by-container
 Сначала посмотрим, создало ли одно из стандартных правил уведомление о нашем файле:
 
 ```bash
-sudo journalctl \
-  -u falco-modern-bpf.service \
-  --since '5 minutes ago' \
-  --output=cat \
-  --no-pager | \
-  grep -F '/mnt/host-data'
+sudo journalctl -u falco-modern-bpf.service --since '5 minutes ago' --output=cat --no-pager | grep -F '/mnt/host-data'
 ```
 
 Команда может ничего не вывести. Произвольный каталог приложения не является универсально опасным путём: многие контейнеры штатно записывают данные в подключённые тома. Контекст о том, что именно этот каталог должен быть доступен контейнеру только для чтения, известен владельцу приложения, но неизвестен стандартному набору правил Falco.
@@ -2700,8 +2702,7 @@ sudo journalctl \
 Как и в первой практике, сначала создадим широкое временное правило наблюдения. Оно покажет фактический тип события, путь, процесс и флаги открытия файла на нашем стенде.
 
 ```bash
-sudo vim \
-  /etc/falco/rules.d/02-writable-bind-mount-observe.yaml
+sudo vim /etc/falco/rules.d/02-writable-bind-mount-observe.yaml
 ```
 
 Содержимое файла:
@@ -2744,56 +2745,41 @@ sudo vim \
 ```bash
 sudo falco --dry-run
 echo $?
-
 sudo systemctl restart falco-modern-bpf.service
-sudo systemctl --no-pager --full \
-  status falco-modern-bpf.service
+sudo systemctl --no-pager --full status falco-modern-bpf.service
 ```
 
-Файл правила должен получить отметку `schema validation: ok`, код завершения должен быть равен `0`, а служба — перейти в состояние `active (running)`.
+Файл правила должен получить отметку `schema validation: ok`, код завершения должен быть равен `0`, а служба - перейти в состояние `active (running)`.
 
 ### Повторная запись под наблюдением
 
 С хоста вернём маркер в исходное состояние:
 
 ```bash
-printf 'owner=host\nstate=original\n' | \
-  sudo tee \
-  /srv/container-security-lab/practice-02/host-marker.txt \
-  >/dev/null
-
-sudo chown 10001:10001 \
-  /srv/container-security-lab/practice-02/host-marker.txt
-sudo chmod 0640 \
-  /srv/container-security-lab/practice-02/host-marker.txt
+sudo vim /srv/container-security-lab/practice-02/host-marker.txt
 ```
 
-Зафиксируем время и повторим штатный и атакующий запросы:
+```text
+owner=host
+state=original
+```
 
 ```bash
-LAB_BIND_OBSERVE_START=$(date --iso-8601=seconds)
-printf '%s\n' "$LAB_BIND_OBSERVE_START"
+sudo chown 10001:10001 /srv/container-security-lab/practice-02/host-marker.txt
+sudo chmod 0640 /srv/container-security-lab/practice-02/host-marker.txt
+```
 
-curl --fail --silent --show-error \
-  --get \
-  --data-urlencode 'host=127.0.0.1' \
-  'http://127.0.0.1:8080/ping' | jq
+Повторим штатный и атакующий запросы:
 
-curl --fail --silent --show-error \
-  --get \
-  --data-urlencode 'host=127.0.0.1; printf "owner=host\nstate=observed-write\n" > /mnt/host-data/host-marker.txt' \
-  'http://127.0.0.1:8080/ping' | jq
+```bash
+http://192.168.0.69:8080/ping?host=127.0.0.1
+http://192.168.0.69:8080/ping?host=127.0.0.1%3B%20printf%20%22owner%3Dhost%5Cnstate%3Dmodified-by-container%5Cn%22%20%3E%20%2Fmnt%2Fhost-data%2Fhost-marker.txt
 ```
 
 Выведем события временного правила:
 
 ```bash
-sudo journalctl \
-  -u falco-modern-bpf.service \
-  --since "$LAB_BIND_OBSERVE_START" \
-  --output=cat \
-  --no-pager | \
-  jq --raw-input --raw-output '
+sudo journalctl -u falco-modern-bpf.service --output=cat --no-pager | jq --raw-input --raw-output '
     fromjson?
     | select(.rule == "Laboratory container file write observation")
     | [
@@ -2812,53 +2798,330 @@ sudo journalctl \
   '
 ```
 
+<details>
+<summary>Развернуть вывод команды</summary>
+
+  ```bash
+scrock_@scrockcontainers:~/container-security-lab/scenarios/02-writable-bind-mount$ sudo journalctl -u falco-modern-bpf.service --output=cat --no-pager | jq --raw-input --raw-output '
+    fromjson?
+    | select(.rule == "Laboratory container file write observation")
+    | [
+        .time,
+        .output_fields["evt.type"],
+        .output_fields["evt.res"],
+        .output_fields["fd.name"],
+        .output_fields["evt.arg.flags"],
+        .output_fields["proc.name"],
+        .output_fields["proc.pname"],
+        .output_fields["proc.cmdline"],
+        .output_fields["user.uid"],
+        .output_fields["container.name"]
+      ]
+    | @tsv
+  '
+2026-10-17T21:31:46.330357743Z  openat  SUCCESS /proc/self/oom_score_adj      O_RDWR   6       runc    6 init  0       lab-writable-bind-mount
+2026-10-17T21:31:46.779147553Z  openat  SUCCESS <UNKNOWN>thread-self/fd/8     O_WRONLY|O_CLOEXEC       runc:[1:CHILD]  runc    runc:[1:CHILD] init     10001 lab-writable-bind-mount
+2026-10-17T21:32:23.918655254Z  openat  SUCCESS /proc/self/oom_score_adj      O_RDWR   6       runc    6 init  0       lab-writable-bind-mount
+2026-10-17T21:32:24.650880203Z  openat  SUCCESS <UNKNOWN>thread-self/fd/8     O_WRONLY|O_CLOEXEC       runc:[1:CHILD]  runc    runc:[1:CHILD] init     10001 lab-writable-bind-mount
+2026-10-17T21:32:42.787964093Z  openat  SUCCESS /proc/self/oom_score_adj      O_RDWR   6       runc    6 init  0       lab-writable-bind-mount
+2026-10-17T21:32:43.247479324Z  openat  SUCCESS <UNKNOWN>thread-self/fd/8     O_WRONLY|O_CLOEXEC       runc:[1:CHILD]  runc    runc:[1:CHILD] init     10001 lab-writable-bind-mount
+2026-10-17T21:33:00.064266600Z  openat  SUCCESS /proc/self/oom_score_adj      O_RDWR   6       runc    6 init  0       lab-writable-bind-mount
+2026-10-17T21:33:00.486973737Z  openat  SUCCESS <UNKNOWN>thread-self/fd/8     O_WRONLY|O_CLOEXEC       runc:[1:CHILD]  runc    runc:[1:CHILD] init     10001 lab-writable-bind-mount
+2026-10-17T21:33:18.212827451Z  openat  SUCCESS /proc/self/oom_score_adj      O_RDWR   6       runc    6 init  0       lab-writable-bind-mount
+2026-10-17T21:33:18.370766819Z  openat  SUCCESS <UNKNOWN>thread-self/fd/8     O_WRONLY|O_CLOEXEC       runc:[1:CHILD]  runc    runc:[1:CHILD] init     10001 lab-writable-bind-mount
+2026-10-17T21:33:36.156484846Z  openat  SUCCESS /proc/self/oom_score_adj      O_RDWR   6       runc    6 init  0       lab-writable-bind-mount
+2026-10-17T21:33:36.362242288Z  openat  SUCCESS <UNKNOWN>thread-self/fd/8     O_WRONLY|O_CLOEXEC       runc:[1:CHILD]  runc    runc:[1:CHILD] init     10001 lab-writable-bind-mount
+2026-10-17T21:33:53.472271193Z  openat  SUCCESS /proc/self/oom_score_adj      O_RDWR   6       runc    6 init  0       lab-writable-bind-mount
+2026-10-17T21:33:53.858789165Z  openat  SUCCESS <UNKNOWN>thread-self/fd/8     O_WRONLY|O_CLOEXEC       runc:[1:CHILD]  runc    runc:[1:CHILD] init     10001 lab-writable-bind-mount
+2026-10-17T21:34:12.814068760Z  openat  SUCCESS /proc/self/oom_score_adj      O_RDWR   6       runc    6 init  0       lab-writable-bind-mount
+2026-10-17T21:34:13.262282424Z  openat  SUCCESS <UNKNOWN>thread-self/fd/8     O_WRONLY|O_CLOEXEC       runc:[1:CHILD]  runc    runc:[1:CHILD] init     10001 lab-writable-bind-mount
+2026-10-17T21:34:27.746806745Z  openat  SUCCESS /proc/self/oom_score_adj      O_RDWR   6       runc    6 init  0       lab-writable-bind-mount
+2026-10-17T21:34:27.959567139Z  openat  SUCCESS <UNKNOWN>thread-self/fd/8     O_WRONLY|O_CLOEXEC       runc:[1:CHILD]  runc    runc:[1:CHILD] init     10001 lab-writable-bind-mount
+2026-10-17T21:34:44.586623421Z  openat  SUCCESS /proc/self/oom_score_adj      O_RDWR   6       runc    6 init  0       lab-writable-bind-mount
+2026-10-17T21:34:44.872176867Z  openat  SUCCESS <UNKNOWN>thread-self/fd/8     O_WRONLY|O_CLOEXEC       runc:[1:CHILD]  runc    runc:[1:CHILD] init     10001 lab-writable-bind-mount
+2026-10-17T21:34:54.201268872Z  open    SUCCESS /mnt/host-data/host-marker.txtO_LARGEFILE|O_TRUNC|O_CREAT|O_WRONLY     sh      python  sh -c /bin/ping -c 1 -W 1 127.0.0.1; printf "owner=host\\nstate=modified-by-container\\n" > /mnt/host-data/host-marker.txt    10001   lab-writable-bind-mount
+2026-10-17T21:35:02.259244408Z  openat  SUCCESS /proc/self/oom_score_adj      O_RDWR   6       runc    6 init  0       lab-writable-bind-mount
+2026-10-17T21:35:02.747533120Z  openat  SUCCESS <UNKNOWN>thread-self/fd/8     O_WRONLY|O_CLOEXEC       runc:[1:CHILD]  runc    runc:[1:CHILD] init     10001 lab-writable-bind-mount
+2026-10-17T21:35:19.532568027Z  openat  SUCCESS /proc/self/oom_score_adj      O_RDWR   6       runc    6 init  0       lab-writable-bind-mount
+2026-10-17T21:35:19.887690974Z  openat  SUCCESS <UNKNOWN>thread-self/fd/8     O_WRONLY|O_CLOEXEC       runc:[1:CHILD]  runc    runc:[1:CHILD] init     10001 lab-writable-bind-mount
+2026-10-17T21:35:34.496661338Z  openat  SUCCESS /proc/self/oom_score_adj      O_RDWR   6       runc    6 init  0       lab-writable-bind-mount
+2026-10-17T21:35:34.680916951Z  openat  SUCCESS <UNKNOWN>thread-self/fd/8     O_WRONLY|O_CLOEXEC       runc:[1:CHILD]  runc    runc:[1:CHILD] init     10001 lab-writable-bind-mount
+2026-10-17T21:35:49.766763573Z  openat  SUCCESS /proc/self/oom_score_adj      O_RDWR   6       runc    6 init  0       lab-writable-bind-mount
+2026-10-17T21:35:50.050795958Z  openat  SUCCESS <UNKNOWN>thread-self/fd/8     O_WRONLY|O_CLOEXEC       runc:[1:CHILD]  runc    runc:[1:CHILD] init     10001 lab-writable-bind-mount
+```
+
+</details>
+
 Ожидается событие успешного открытия `/mnt/host-data/host-marker.txt` для записи. Процессом, вероятнее всего, будет `sh`, потому что именно оболочка обрабатывает перенаправление `>`. Штатный запрос не должен создавать файлового события этого правила.
 
-> **ПРИШЛИТЕ ВЫВОД № 5.** Это ключевой вывод для настройки детекта. Пришлите результат команды с `journalctl` полностью. Если строк нет, дополнительно пришлите `sudo falco --dry-run` и последние 100 строк журнала службы Falco.
+Временное правило сформировало целевое событие:
+
+```text
+2026-10-17T21:34:54.201268872Z  open  SUCCESS  /mnt/host-data/host-marker.txt  O_LARGEFILE|O_TRUNC|O_CREAT|O_WRONLY  sh  python  sh -c /bin/ping -c 1 -W 1 127.0.0.1; printf "owner=host\\nstate=modified-by-container\\n" > /mnt/host-data/host-marker.txt  10001  lab-writable-bind-mount
+```
+
+Разберём поля этого события:
+
+- `evt.type=open` - оболочка вызвала системный вызов открытия файла;
+- `evt.res=SUCCESS` и неотрицательный `evt.rawres` подтверждают, что ядро
+  разрешило операцию и вернуло файловый дескриптор;
+- `fd.name=/mnt/host-data/host-marker.txt` содержит путь, видимый процессу
+  внутри контейнера;
+- `O_WRONLY` запрашивает доступ только для записи, `O_CREAT` разрешает создать
+  отсутствующий файл, а `O_TRUNC` обнуляет длину существующего файла при
+  успешном открытии;
+- `proc.name=sh` и `proc.pname=python` показывают, что перенаправление выполнила
+  оболочка, запущенная веб-приложением;
+- `user.uid=10001` подтверждает, что для изменения не потребовался пользователь
+  `root`;
+- `container.name=lab-writable-bind-mount` связывает событие с исследуемой
+  рабочей нагрузкой.
+
+Системный вызов `open` в этом событии не содержит записываемые байты. Обычно после него следуют вызовы `write`, однако флаг `O_TRUNC` уже изменяет размер существующего файла в момент успешного открытия. Полное изменение содержимого мы доказали отдельно, прочитав файл на хосте и сравнив его контрольную сумму. Таким образом, событие Falco показывает механизм воздействия, а проверка файла показывает его результат.
+
+Отдельного процесса `printf` в событии нет. Команда реализована внутри `sh`, а оператор `>` обрабатывается оболочкой до выполнения встроенной функции. Поэтому детект, основанный только на запуске подозрительной программы, эту запись не увидел бы.
+
+В выводе временного правила также появились служебные события:
+
+```text
+openat  SUCCESS  /proc/self/oom_score_adj       O_RDWR                 6               runc
+openat  SUCCESS  <UNKNOWN>thread-self/fd/8      O_WRONLY|O_CLOEXEC     runc:[1:CHILD]   runc
+```
+
+Они повторялись при запуске процессов контейнера, в том числе во время периодической проверки работоспособности. Falco связал служебные процессы `runc` с контейнером, поэтому одного условия `container.name` оказалось недостаточно. Это не ложная телеметрия, правило наблюдения намеренно выбирало любое успешное открытие обычного файла для записи внутри контекста контейнера. Для окончательного детекта добавим проверку пути `/mnt/host-data/`. Она уберёт операции среды выполнения и оставит только доступ к защищаемому каталогу.
 
 ### Проверка временного события в Kibana
 
-В `Discover` выберем представление `Falco events`, установим интервал эксперимента и зададим KQL-фильтр:
+Событие уже найдено в локальном журнале Falco. Теперь проверим вторую часть цепочки, доставку того же уведомления через Falcosidekick в Elasticsearch. В `Discover` выберем представление `Falco events`, установим интервал, включающий `2026-10-17 21:34:54`, и зададим KQL-фильтр:
 
 ```text
 rule : "Laboratory container file write observation"
 and output_fields.container_name : "lab-writable-bind-mount"
 ```
 
-Добавим в таблицу поля:
+![image1dockerruntimearchitecture](./images/docker-runtime-architecture-1.png)
 
-- `@timestamp`;
-- `rule`;
-- `priority`;
-- `output_fields.evt_type`;
-- `output_fields.evt_res`;
-- `output_fields.fd_name`;
-- `output_fields.evt_arg_flags`;
-- `output_fields.proc_name`;
-- `output_fields.proc_pname`;
-- `output_fields.proc_cmdline`;
-- `output_fields.user_name` и `output_fields.user_uid`;
-- `output_fields.container_name`.
+<details>
+<summary>Развернуть событие</summary>
 
-Falcosidekick с включённым `ELASTICSEARCH_FLATTENFIELDS=true` заменяет точки в именах полей Falco символами подчёркивания. Поэтому поле `fd.name` из исходного уведомления отображается в Elasticsearch как `output_fields.fd_name`.
+  ```bash
+{
+  "_index": "falco-2026.10.17",
+  "_id": "8kLKS6EBABcwyyR9CVyQ",
+  "_version": 1,
+  "_source": {
+    "uuid": "a52dd2b5-a046-4a8c-aded-e35a2df6ae7c",
+    "output": "21:34:54.201268872: Notice Laboratory container opened a file for writing | evt_type=open result=SUCCESS raw_result=3 file=/mnt/host-data/host-marker.txt directory=/mnt/host-data flags=O_LARGEFILE|O_TRUNC|O_CREAT|O_WRONLY process=sh proc_exepath=/bin/busybox parent=python command=sh -c /bin/ping -c 1 -W 1 127.0.0.1; printf \"owner=host\\nstate=modified-by-container\\n\" > /mnt/host-data/host-marker.txt user=lab user_uid=10001 container_id=63ee99ad80c3 container_name=lab-writable-bind-mount container_image_repository=container-security-lab/writable-bind-mount container_image_tag=1.0-vulnerable k8s_pod_name=<NA> k8s_ns_name=<NA>",
+    "priority": "Notice",
+    "rule": "Laboratory container file write observation",
+    "time": "2026-10-17T21:34:54.201268872Z",
+    "output_fields": {
+      "container_id": "63ee99ad80c3",
+      "container_image_repository": "container-security-lab/writable-bind-mount",
+      "container_image_tag": "1.0-vulnerable",
+      "container_name": "lab-writable-bind-mount",
+      "evt_arg_flags": "O_LARGEFILE|O_TRUNC|O_CREAT|O_WRONLY",
+      "evt_rawres": 3,
+      "evt_res": "SUCCESS",
+      "evt_time": 1792272894201269000,
+      "evt_type": "open",
+      "fd_directory": "/mnt/host-data",
+      "fd_name": "/mnt/host-data/host-marker.txt",
+      "k8s_ns_name": null,
+      "k8s_pod_name": null,
+      "proc_cmdline": "sh -c /bin/ping -c 1 -W 1 127.0.0.1; printf \"owner=host\\nstate=modified-by-container\\n\" > /mnt/host-data/host-marker.txt",
+      "proc_exepath": "/bin/busybox",
+      "proc_name": "sh",
+      "proc_pname": "python",
+      "user_name": "lab",
+      "user_uid": 10001
+    },
+    "source": "syscall",
+    "tags": [
+      "T1611",
+      "container",
+      "filesystem",
+      "lab_observation",
+      "mitre_privilege_escalation"
+    ],
+    "hostname": "scrockcontainers",
+    "@timestamp": "2026-10-17T21:34:54.201268872Z"
+  },
+  "fields": {
+    "output_fields.container_name.keyword": [
+      "lab-writable-bind-mount"
+    ],
+    "output_fields.proc_name": [
+      "sh"
+    ],
+    "output_fields.container_image_tag.keyword": [
+      "1.0-vulnerable"
+    ],
+    "output_fields.evt_time": [
+      1792272894201269000
+    ],
+    "source": [
+      "syscall"
+    ],
+    "output_fields.proc_exepath": [
+      "/bin/busybox"
+    ],
+    "uuid": [
+      "a52dd2b5-a046-4a8c-aded-e35a2df6ae7c"
+    ],
+    "output": [
+      "21:34:54.201268872: Notice Laboratory container opened a file for writing | evt_type=open result=SUCCESS raw_result=3 file=/mnt/host-data/host-marker.txt directory=/mnt/host-data flags=O_LARGEFILE|O_TRUNC|O_CREAT|O_WRONLY process=sh proc_exepath=/bin/busybox parent=python command=sh -c /bin/ping -c 1 -W 1 127.0.0.1; printf \"owner=host\\nstate=modified-by-container\\n\" > /mnt/host-data/host-marker.txt user=lab user_uid=10001 container_id=63ee99ad80c3 container_name=lab-writable-bind-mount container_image_repository=container-security-lab/writable-bind-mount container_image_tag=1.0-vulnerable k8s_pod_name=<NA> k8s_ns_name=<NA>"
+    ],
+    "output_fields.proc_exepath.keyword": [
+      "/bin/busybox"
+    ],
+    "hostname": [
+      "scrockcontainers"
+    ],
+    "output_fields.container_image_repository": [
+      "container-security-lab/writable-bind-mount"
+    ],
+    "output_fields.container_id.keyword": [
+      "63ee99ad80c3"
+    ],
+    "output_fields.proc_cmdline": [
+      "sh -c /bin/ping -c 1 -W 1 127.0.0.1; printf \"owner=host\\nstate=modified-by-container\\n\" > /mnt/host-data/host-marker.txt"
+    ],
+    "output_fields.evt_rawres": [
+      3
+    ],
+    "output_fields.container_image_tag": [
+      "1.0-vulnerable"
+    ],
+    "priority": [
+      "Notice"
+    ],
+    "tags": [
+      "T1611",
+      "container",
+      "filesystem",
+      "lab_observation",
+      "mitre_privilege_escalation"
+    ],
+    "output_fields.user_name": [
+      "lab"
+    ],
+    "hostname.keyword": [
+      "scrockcontainers"
+    ],
+    "output_fields.evt_res": [
+      "SUCCESS"
+    ],
+    "tags.keyword": [
+      "T1611",
+      "container",
+      "filesystem",
+      "lab_observation",
+      "mitre_privilege_escalation"
+    ],
+    "rule": [
+      "Laboratory container file write observation"
+    ],
+    "uuid.keyword": [
+      "a52dd2b5-a046-4a8c-aded-e35a2df6ae7c"
+    ],
+    "output_fields.fd_directory.keyword": [
+      "/mnt/host-data"
+    ],
+    "output_fields.proc_pname": [
+      "python"
+    ],
+    "output_fields.evt_type.keyword": [
+      "open"
+    ],
+    "output_fields.evt_arg_flags": [
+      "O_LARGEFILE|O_TRUNC|O_CREAT|O_WRONLY"
+    ],
+    "output_fields.user_uid.keyword": [
+      "10001"
+    ],
+    "output_fields.fd_directory": [
+      "/mnt/host-data"
+    ],
+    "output_fields.container_image_repository.keyword": [
+      "container-security-lab/writable-bind-mount"
+    ],
+    "output_fields.container_name": [
+      "lab-writable-bind-mount"
+    ],
+    "output_fields.proc_pname.keyword": [
+      "python"
+    ],
+    "source.keyword": [
+      "syscall"
+    ],
+    "output_fields.proc_cmdline.keyword": [
+      "sh -c /bin/ping -c 1 -W 1 127.0.0.1; printf \"owner=host\\nstate=modified-by-container\\n\" > /mnt/host-data/host-marker.txt"
+    ],
+    "priority.keyword": [
+      "Notice"
+    ],
+    "output_fields.evt_type": [
+      "open"
+    ],
+    "output_fields.user_uid": [
+      "10001"
+    ],
+    "output.keyword": [
+      "21:34:54.201268872: Notice Laboratory container opened a file for writing | evt_type=open result=SUCCESS raw_result=3 file=/mnt/host-data/host-marker.txt directory=/mnt/host-data flags=O_LARGEFILE|O_TRUNC|O_CREAT|O_WRONLY process=sh proc_exepath=/bin/busybox parent=python command=sh -c /bin/ping -c 1 -W 1 127.0.0.1; printf \"owner=host\\nstate=modified-by-container\\n\" > /mnt/host-data/host-marker.txt user=lab user_uid=10001 container_id=63ee99ad80c3 container_name=lab-writable-bind-mount container_image_repository=container-security-lab/writable-bind-mount container_image_tag=1.0-vulnerable k8s_pod_name=<NA> k8s_ns_name=<NA>"
+    ],
+    "output_fields.evt_arg_flags.keyword": [
+      "O_LARGEFILE|O_TRUNC|O_CREAT|O_WRONLY"
+    ],
+    "output_fields.fd_name": [
+      "/mnt/host-data/host-marker.txt"
+    ],
+    "output_fields.container_id": [
+      "63ee99ad80c3"
+    ],
+    "@timestamp": [
+      "2026-10-17T21:34:54.201Z"
+    ],
+    "output_fields.user_name.keyword": [
+      "lab"
+    ],
+    "output_fields.evt_res.keyword": [
+      "SUCCESS"
+    ],
+    "output_fields.fd_name.keyword": [
+      "/mnt/host-data/host-marker.txt"
+    ],
+    "time": [
+      "2026-10-17T21:34:54.201Z"
+    ],
+    "output_fields.proc_name.keyword": [
+      "sh"
+    ],
+    "rule.keyword": [
+      "Laboratory container file write observation"
+    ]
+  }
+}
+```
 
-> **ПРИШЛИТЕ ВЫВОД № 6.** Нужны снимок таблицы Kibana и JSON одного документа через `View single document`. По нему проверим реальные имена полей перед окончательной редакцией главы.
+</details>
+
+Значение `evt_rawres=3` — не количество записанных байтов и не код успеха. Для успешного `open` это номер файлового дескриптора, который ядро вернуло процессу. Отдельное поле `evt_res=SUCCESS` предоставляет текстовое представление результата.
+
+Путь и флаги подтверждают, что оболочка успешно открыла именно файл в bind mount с возможностью записи. `proc_exepath=/bin/busybox` объясняется устройством образа: `sh` является апплетом многовызовного исполняемого файла BusyBox. Сочетание `proc_name=sh`, `proc_pname=python` и полной командной строки связывает файловую операцию с запросом к уязвимому приложению. Поля пользователя показывают, что действие выполнил `lab` с UID `10001`, а поля контейнера однозначно указывают на лабораторную рабочую нагрузку.
 
 ### Окончательное правило записи
 
-Если временное событие содержит ожидаемый путь `/mnt/host-data/host-marker.txt`, отключим правило наблюдения:
+Фактическое событие содержит полный путь `/mnt/host-data/host-marker.txt`, поэтому можно сузить условие до защищаемой точки монтирования. Сначала отключим широкое правило наблюдения:
 
 ```bash
-sudo mv \
-  /etc/falco/rules.d/02-writable-bind-mount-observe.yaml \
-  /etc/falco/rules.d/02-writable-bind-mount-observe.yaml.disabled
+sudo mv /etc/falco/rules.d/02-writable-bind-mount-observe.yaml /etc/falco/rules.d/02-writable-bind-mount-observe.yaml.disabled
 ```
 
 Создадим окончательное правило:
 
 ```bash
-sudo vim \
-  /etc/falco/rules.d/02-writable-bind-mount.yaml
+sudo vim /etc/falco/rules.d/02-writable-bind-mount.yaml
 ```
 
 ```yaml
@@ -2881,10 +3144,12 @@ sudo vim \
     and fd.name startswith "/mnt/host-data/"
   output: >
     File in laboratory host bind mount opened for writing |
-    evt_type=%evt.type result=%evt.res file=%fd.name
-    flags=%evt.arg.flags process=%proc.name
+    evt_type=%evt.type result=%evt.res raw_result=%evt.rawres
+    file=%fd.name directory=%fd.directory flags=%evt.arg.flags
+    process=%proc.name
     proc_exepath=%proc.exepath parent=%proc.pname
-    command=%proc.cmdline user=%user.name user_uid=%user.uid
+    grandparent=%proc.aname[2] command=%proc.cmdline
+    user=%user.name user_uid=%user.uid
   priority: ERROR
   tags:
     - container
@@ -2894,13 +3159,17 @@ sudo vim \
     - T1611
 ```
 
-Условие не привязано к имени `printf`, `sh` или другой программы. Опасным считается само успешное открытие файла в защищаемом каталоге для записи. Поэтому замена команды или способа запуска не должна обходить правило.
+Макрос `lab_successful_file_open_for_write` отделяет общий файловый признак от контекста конкретной рабочей нагрузки. Он выбирает события выхода из `open`, `openat` и `openat2`, для которых был запрошен режим записи и ядро вернуло неотрицательный результат. Проверка `fd.typechar='f'` оставляет обычные файлы.
 
-Приоритет `ERROR` выше, чем в правиле первой практики: здесь зафиксировано не только неожиданное выполнение процесса, но и успешное изменение ресурса, физически расположенного на хосте.
+Оператор `startswith` охватывает не только контрольный маркер, но и остальные файлы ниже `/mnt/host-data/`, включая вложенные каталоги. Завершающий `/` важен: без него условию соответствовал бы, например, путь `/mnt/host-data-copy/file`. Служебные записи `runc` в `/proc` и `<UNKNOWN>thread-self/fd/8`, найденные временным правилом, этому условию уже не соответствуют.
+
+Правило не привязано к имени `printf`, `sh` или другой программы. Опасным считается успешное получение доступа на запись к файлу в защищаемом каталоге. Поэтому замена команды или способа запуска не должна обходить детект, пока операция приводит к одному из контролируемых системных вызовов открытия.
+
+Приоритет `ERROR` выше, чем в правиле первой практики: процесс уже получил дескриптор с правом записи к объекту, физически расположенному на хосте. В проверенном событии флаг `O_TRUNC` и изменившаяся контрольная сумма дополнительно доказывают фактическое нарушение целостности. При анализе других срабатываний нужно помнить, что одно лишь открытие с `O_WRONLY` или `O_RDWR` ещё не подтверждает последующую передачу данных через `write`.
 
 Правило намеренно контролирует только успешные открытия. После перевода точки монтирования в режим `read-only` неуспешная попытка не удовлетворит условию `evt.rawres>=0`. Факт предотвращения будем доказывать отдельно по ошибке приложения, параметру `RW: false` и неизменной контрольной сумме.
 
-> **ПРОВЕРКА ПЕРЕД ПРОДОЛЖЕНИЕМ.** Если в выводе № 5 Falco показал другой путь, не создавайте это окончательное правило без корректировки условия `fd.name startswith`. Сначала пришлите событие.
+Такой детект не охватывает все способы изменения файловой системы. Например, удаление и переименование используют `unlink`, `unlinkat`, `rename` или `renameat`, а запись через уже открытый ранее дескриптор не создаёт нового `open`. В этой практике правило отвечает на более узкий и проверяемый вопрос: «успешно ли процесс исследуемого контейнера открыл файл в bind mount для записи?» Расширять его на остальные операции следует отдельными условиями и тестами, а не считать их обнаруженными автоматически.
 
 Проверим и загрузим правило:
 
@@ -2909,8 +3178,7 @@ sudo falco --dry-run
 echo $?
 
 sudo systemctl restart falco-modern-bpf.service
-sudo systemctl --no-pager --full \
-  status falco-modern-bpf.service
+sudo systemctl --no-pager --full status falco-modern-bpf.service
 ```
 
 ### Проверка окончательного правила
@@ -2920,18 +3188,17 @@ sudo systemctl --no-pager --full \
 Сначала вернём исходное содержимое и удалим результат возможной предыдущей проверки:
 
 ```bash
-printf 'owner=host\nstate=original\n' | \
-  sudo tee \
-  /srv/container-security-lab/practice-02/host-marker.txt \
-  >/dev/null
+sudo vim /srv/container-security-lab/practice-02/host-marker.txt
+```
 
-sudo chown 10001:10001 \
-  /srv/container-security-lab/practice-02/host-marker.txt
-sudo chmod 0640 \
-  /srv/container-security-lab/practice-02/host-marker.txt
+```text
+owner=host
+state=original
+```
 
-sudo rm -f \
-  /srv/container-security-lab/practice-02/created-from-container.txt
+```bash
+sudo chown 10001:10001 /srv/container-security-lab/practice-02/host-marker.txt
+sudo chmod 0640 /srv/container-security-lab/practice-02/host-marker.txt
 ```
 
 Зафиксируем время:
@@ -2944,10 +3211,7 @@ printf '%s\n' "$LAB_BIND_RULE_START"
 #### 1. Штатный запрос
 
 ```bash
-curl --fail --silent --show-error \
-  --get \
-  --data-urlencode 'host=127.0.0.1' \
-  'http://127.0.0.1:8080/ping' | jq
+http://192.168.0.69:8080/ping?host=127.0.0.1
 ```
 
 Ожидаемый результат: приложение отвечает успешно, правило записи не срабатывает.
@@ -2955,10 +3219,7 @@ curl --fail --silent --show-error \
 #### 2. Изменение существующего файла из контейнера
 
 ```bash
-curl --fail --silent --show-error \
-  --get \
-  --data-urlencode 'host=127.0.0.1; printf "owner=host\nstate=final-rule-test\n" > /mnt/host-data/host-marker.txt' \
-  'http://127.0.0.1:8080/ping' | jq
+http://192.168.0.69:8080/ping?host=127.0.0.1%3B%20printf%20%22owner%3Dhost%5Cnstate%3Dfinal-rule-test%5Cn%22%20%3E%20%2Fmnt%2Fhost-data%2Fhost-marker.txt
 ```
 
 Ожидаемый результат: файл меняется, Falco создаёт уведомление с путём `/mnt/host-data/host-marker.txt`.
@@ -2966,10 +3227,7 @@ curl --fail --silent --show-error \
 #### 3. Создание нового файла из контейнера
 
 ```bash
-curl --fail --silent --show-error \
-  --get \
-  --data-urlencode 'host=127.0.0.1; printf "created-by-container\n" > /mnt/host-data/created-from-container.txt' \
-  'http://127.0.0.1:8080/ping' | jq
+http://192.168.0.69:8080/ping?host=127.0.0.1%3B%20printf%20%22created-by-container%5Cn%22%20%3E%20%2Fmnt%2Fhost-data%2Fcreated-from-container.txt
 ```
 
 Ожидаемый результат: в каталоге хоста появляется новый файл, а правило создаёт второе уведомление.
@@ -2977,10 +3235,7 @@ curl --fail --silent --show-error \
 #### 4. Административное изменение с хоста
 
 ```bash
-printf 'owner=host\nstate=changed-from-host\n' | \
-  sudo tee \
-  /srv/container-security-lab/practice-02/host-marker.txt \
-  >/dev/null
+printf 'owner=host\nstate=changed-from-host\n' | sudo tee /srv/container-security-lab/practice-02/host-marker.txt >/dev/null
 ```
 
 Операция затрагивает тот же файл, но выполняется процессом хоста, для которого `container.id = host`. Наше правило ограничено лабораторным контейнером и не должно сработать.
@@ -3010,9 +3265,37 @@ sudo journalctl \
   '
 ```
 
-Ожидаются две строки: для перезаписи `host-marker.txt` и для создания `created-from-container.txt`. Штатный запрос и запись, выполненная с хоста, появиться не должны.
+<details>
+<summary>Развернуть вывод команды</summary>
 
-> **ПРИШЛИТЕ ВЫВОД № 7.** Нужны четыре HTTP-результата или краткое подтверждение каждого действия, вывод `journalctl`, а также `sudo ls -l /srv/container-security-lab/practice-02`.
+  ```bash
+scrock_@scrockcontainers:~/container-security-lab/scenarios/02-writable-bind-mount$ sudo journalctl \
+  -u falco-modern-bpf.service \
+  --since "$LAB_BIND_RULE_START" \
+  --output=cat \
+  --no-pager | \
+  jq --raw-input --raw-output '
+    fromjson?
+    | select(.rule == "Write to laboratory host bind mount")
+    | [
+        .time,
+        .output_fields["fd.name"],
+        .output_fields["evt.arg.flags"],
+        .output_fields["proc.name"],
+        .output_fields["proc.pname"],
+        .output_fields["proc.cmdline"],
+        .output_fields["user.uid"],
+        .output_fields["container.name"]
+      ]
+    | @tsv
+  '
+2026-10-17T22:03:51.652535459Z  /mnt/host-data/host-marker.txt  O_LARGEFILE|O_TRUNC|O_CREAT|O_WRONLY   sh      python  sh -c /bin/ping -c 1 -W 1 127.0.0.1; printf "owner=host\\nstate=final-rule-test\\n" > /mnt/host-data/host-marker.txt 10001    lab-writable-bind-mount
+2026-10-17T22:03:57.069109291Z  /mnt/host-data/created-from-container.txt     O_LARGEFILE|O_TRUNC|O_CREAT|O_WRONLY|O_F_CREATED sh      python  sh -c /bin/ping -c 1 -W 1 127.0.0.1; printf "created-by-container\\n" > /mnt/host-data/created-from-container.txt     10001   lab-writable-bind-mount
+```
+
+</details>
+
+Ожидаются две строки, для перезаписи `host-marker.txt` и для создания `created-from-container.txt`. Штатный запрос и запись, выполненная с хоста, появиться не должны.
 
 ### Проверка окончательного правила в Kibana
 
@@ -3023,160 +3306,90 @@ rule : "Write to laboratory host bind mount"
 and output_fields.container_name : "lab-writable-bind-mount"
 ```
 
-Для таблицы выберем:
+![Путь от образа контейнера до процесса приложения](./images/writable-bind-mount-2.png)
 
-- `@timestamp`;
-- `priority`;
-- `output_fields.fd_name`;
-- `output_fields.evt_arg_flags`;
-- `output_fields.proc_name`;
-- `output_fields.proc_pname`;
-- `output_fields.proc_cmdline`;
-- `output_fields.user_name` и `output_fields.user_uid`;
-- `output_fields.container_name`;
-- `output_fields.container_image_repository` и `output_fields.container_image_tag`.
+Две строки с разными путями показывают, что правило обнаруживает не конкретную строку команды, а класс операций — успешное открытие файлов в подключённом каталоге хоста с возможностью записи.
 
-Две строки с разными путями показывают, что правило обнаруживает не конкретную строку команды, а класс операций — успешную запись из контейнера в подключённый каталог хоста.
+### Разбор результата окончательного правила
 
-> **ПРИШЛИТЕ ВЫВОД № 8.** Нужен снимок таблицы Kibana после проверки окончательного правила. Его добавим в статью вместе с подписью, объясняющей выбранные поля.
+Фактический вывод соответствует ожидаемой модели. Falco сформировал два уведомления: первое при перезаписи существующего `host-marker.txt`, второе при создании `created-from-container.txt`. Штатная проверка адреса и изменение маркера непосредственно с хоста в результат не попали.
 
-### Исправление конфигурации
+У обоих обнаруженных событий совпадает контекст выполнения:
 
-Приложению не требуется изменять лабораторные данные. Поэтому исправим не код контейнера, а режим точки монтирования. В `compose.yaml` изменим только один параметр:
+- файл открывает процесс `sh`;
+- родительским процессом является `python`;
+- команда выполняется от имени пользователя `lab` с UID `10001`;
+- событие относится к контейнеру `lab-writable-bind-mount`;
+- путь находится ниже контролируемого каталога `/mnt/host-data/`;
+- системный вызов завершился успешно и вернул файловый дескриптор.
 
-```yaml
-    volumes:
-      - type: bind
-        source: /srv/container-security-lab/practice-02
-        target: /mnt/host-data
-        read_only: true
-        bind:
-          propagation: rprivate
-```
+Имена файлов и аргументы команд различаются, но правило срабатывает в обоих случаях. Значит, оно обнаруживает не конкретную строку `printf` и не один заранее известный файл, а проверяемый класс поведения: успешное открытие файла в подключённом каталоге хоста с возможностью записи.
 
-Пересоздадим контейнер, потому что параметры существующей точки монтирования не меняются простым перезапуском процесса:
-
-```bash
-sudo docker compose config --quiet
-sudo docker compose up \
-  --detach \
-  --force-recreate \
-  --wait
-```
-
-Проверим фактическую конфигурацию:
-
-```bash
-sudo docker inspect \
-  lab-writable-bind-mount \
-  --format '{{json .Mounts}}' | jq
-```
-
-Теперь для точки `/mnt/host-data` должно быть указано:
-
-```json
-"RW": false
-```
-
-Это проверять обязательно: успешное редактирование `compose.yaml` ещё не доказывает, что контейнер был пересоздан с новыми параметрами.
-
-### Повторная атака после исправления
-
-С хоста вернём контрольный файл в исходное состояние и сохраним его сумму в переменной:
-
-```bash
-printf 'owner=host\nstate=original\n' | \
-  sudo tee \
-  /srv/container-security-lab/practice-02/host-marker.txt \
-  >/dev/null
-
-sudo chown 10001:10001 \
-  /srv/container-security-lab/practice-02/host-marker.txt
-sudo chmod 0640 \
-  /srv/container-security-lab/practice-02/host-marker.txt
-
-BEFORE_BIND_TEST=$(sudo sha256sum \
-  /srv/container-security-lab/practice-02/host-marker.txt | \
-  awk '{print $1}')
-
-printf 'before=%s\n' "$BEFORE_BIND_TEST"
-```
-
-Повторим тот же запрос:
-
-```bash
-LAB_BIND_READONLY_START=$(date --iso-8601=seconds)
-
-curl --silent --show-error \
-  --get \
-  --data-urlencode 'host=127.0.0.1; printf "owner=host\nstate=should-not-appear\n" > /mnt/host-data/host-marker.txt' \
-  'http://127.0.0.1:8080/ping' | jq
-```
-
-Ожидаются ненулевой `returncode` и сообщение в `stderr`:
+Флаги позволяют различить две операции. Для `host-marker.txt` Falco показал:
 
 ```text
-/bin/sh: can't create /mnt/host-data/host-marker.txt: Read-only file system
+O_LARGEFILE|O_TRUNC|O_CREAT|O_WRONLY
 ```
 
-Сравним контрольную сумму:
+`O_WRONLY` означает открытие только для записи, `O_TRUNC` - обнуление длины существующего файла, а `O_CREAT` разрешает создать объект, если его ещё нет. Наличие `O_CREAT` само по себе не доказывает создание, этот флаг передаётся и при открытии уже существующего пути.
 
-```bash
-AFTER_BIND_TEST=$(sudo sha256sum \
-  /srv/container-security-lab/practice-02/host-marker.txt | \
-  awk '{print $1}')
+Для `created-from-container.txt` появился дополнительный признак:
 
-printf 'before=%s\nafter=%s\n' \
-  "$BEFORE_BIND_TEST" \
-  "$AFTER_BIND_TEST"
-
-test "$BEFORE_BIND_TEST" = "$AFTER_BIND_TEST" && \
-  echo 'Файл хоста не изменился'
+```text
+O_LARGEFILE|O_TRUNC|O_CREAT|O_WRONLY|O_F_CREATED
 ```
 
-Обе суммы должны совпадать, а последняя команда должна вывести `Файл хоста не изменился`.
+[`O_F_CREATED`](https://github.com/falcosecurity/libs/blob/master/driver/ppm_events_public.h#L106-L108) не является пользовательским флагом Linux `open(2)`. Его добавляет средство сбора событий Falco, когда файл действительно был создан во время системного вызова. Поэтому первое уведомление описывает открытие и усечение существующего объекта, а второе - создание нового.
 
-Проверим успешные записи после исправления:
+Отсутствие уведомления при штатном `ping` является корректным результатом, приложение не обращается к `/mnt/host-data/` для записи. Административное изменение с хоста тоже не попало в выборку, поскольку условие правила требует контейнерный контекст и имя `lab-writable-bind-mount`. Процесс `tee`, запущенный на хосте, имеет `container.id = host` и отбрасывается до проверки пути.
 
-```bash
-sudo journalctl \
-  -u falco-modern-bpf.service \
-  --since "$LAB_BIND_READONLY_START" \
-  --output=cat \
-  --no-pager | \
-  jq --raw-input --raw-output '
-    fromjson?
-    | select(.rule == "Write to laboratory host bind mount")
-  '
-```
+Результаты четырёх тестов можно свести в таблицу:
 
-Вывод должен быть пустым, потому что правило регистрирует только успешные открытия для записи, а ядро отклонило операцию. Пустой результат здесь нельзя рассматривать отдельно от остальных проверок. Предотвращение доказывает совокупность трёх фактов:
-
-- Docker сообщает `RW: false`;
-- приложение получает ошибку `Read-only file system`;
-- контрольная сумма файла остаётся неизменной.
-
-Если требуется отдельно обнаруживать заблокированные попытки, понадобится дополнительное правило для неуспешных файловых операций. Его условие и поле пути следует строить по фактической телеметрии неуспешного `openat`, поскольку при ошибке файловый дескриптор не создаётся и `fd.name` может быть недоступно.
-
-> **ПРИШЛИТЕ ВЫВОД № 9.** Нужны `docker inspect` после исправления, JSON-ответ повторной атаки, обе контрольные суммы и результат проверки журнала Falco.
-
-### Итог эксперимента
-
-После заполнения фактических результатов сведём проверки в таблицу:
-
-| Проверка | Ожидаемое действие | Ожидаемое уведомление |
+| Проверка | Фактическое действие | Результат правила |
 |---|---|---|
-| Штатный `ping` | Файл хоста не меняется | Нет |
-| Перезапись маркера из контейнера при `RW: true` | Файл меняется | Да |
-| Создание файла из контейнера при `RW: true` | Файл появляется на хосте | Да |
-| Изменение маркера непосредственно с хоста | Файл меняется | Нет |
-| Повторная атака при `RW: false` | Запись блокируется | Нет для правила успешной записи |
+| Штатный запрос с `ping` | Записи в bind mount нет | Уведомления нет |
+| Перезапись `host-marker.txt` из контейнера | Существующий файл открыт с `O_TRUNC|O_WRONLY` | Уведомление создано |
+| Создание `created-from-container.txt` из контейнера | Новый файл открыт с признаком `O_F_CREATED` | Уведомление создано |
+| Изменение `host-marker.txt` с хоста | Файл изменён вне контейнерного контекста | Уведомления нет |
 
-Главный вывод практики состоит не в том, что контейнер «сломал Docker». Docker выполнил заданную конфигурацию: предоставил процессу прямой доступ к каталогу хоста. Изоляция ослабла в момент создания записываемой точки монтирования.
+Первые два атакующих теста являются истинными срабатываниями. Штатный запрос и административная операция показывают, что правило не реагирует на отсутствие файловой записи и не превращается в общий контроль всех изменений этого файла на хосте.
 
-Режим `read-only` устраняет возможность изменения, но не скрывает данные. Если приложение вообще не должно видеть каталог, правильнее полностью удалить `bind mount`. Минимальные полномочия означают не только запрет записи, но и отсутствие ненужного доступа на чтение.
+### Что именно обнаруживает правило
 
-Окончательное правило Falco остаётся полезным как контроль конфигурации и поведения: оно показывает, что процесс контейнера действительно получил возможность записывать в ресурс хоста. Но основная защита должна находиться в конфигурации запуска — ненужный каталог не подключается, а необходимый для чтения публикуется с `read_only: true`.
+Окончательное правило отвечает на узкий вопрос - успешно ли процесс лабораторного контейнера открыл обычный файл ниже `/mnt/host-data/` с флагами, разрешающими запись. Для этого одновременно проверяются:
+
+1. тип события `open`, `openat` или `openat2`;
+2. событие выхода из системного вызова `evt.dir=<`;
+3. наличие режима записи через `evt.is_open_write=true`;
+4. успешный результат `evt.rawres>=0`;
+5. обычный файл `fd.typechar='f'`;
+6. контейнер `lab-writable-bind-mount`;
+7. путь с префиксом `/mnt/host-data/`.
+
+Каждая часть условия выполняет отдельную задачу. Проверка результата исключает заблокированные попытки, тип дескриптора отделяет обычные файлы от каталогов и сокетов, имя контейнера ограничивает область наблюдения, а путь устраняет служебные события `runc` в `/proc` и `thread-self/fd`, обнаруженные временным правилом.
+
+Проверка `startswith "/mnt/host-data/"` заканчивается символом `/` намеренно. Без него условию соответствовали бы также похожие пути, например `/mnt/host-data-copy/file`. Одновременно такой префикс охватывает произвольные файлы и вложенные каталоги внутри точки монтирования.
+
+Правило Falco выполняет обнаружение, а не предотвращение. Уведомление формируется после того, как системный вызов уже завершился успешно. В нашем эксперименте `O_TRUNC` к этому моменту уже мог обнулить существующий файл, а `O_F_CREATED` подтверждает появление нового. Поэтому наличие события в Kibana не означает, что целостность данных была сохранена: оно предоставляет данные для расследования и последующей реакции.
+
+### Итог практики
+
+Эксперимент показал, что `read_only: true` для корневой файловой системы контейнера не распространяется на отдельно подключённый bind mount. Процессу не потребовались `root`, дополнительные Linux capabilities, режим `--privileged` или эксплуатация уязвимости ядра. Для изменения файла оказалось достаточно трёх условий:
+
+1. каталог хоста подключён в контейнер с правом записи;
+2. числовой UID процесса имеет права на объект хоста;
+3. уязвимость приложения позволяет выполнить команду внутри контейнера.
+
+Тем самым нарушение изоляции произошло не из-за обхода механизма Docker, а из-за заданной конфигурации доступа. Docker предоставил процессу прямой путь к объектам файловой системы хоста и выполнил эту настройку так, как было указано при создании контейнера.
+
+Связка из двух правил показала разные этапы одного сценария. Правило первой практики обнаруживает неожиданный дочерний процесс веб-приложения, но встроенная команда `printf` не обязана создавать отдельный процесс. Файловое правило закрывает этот пробел и фиксирует действие оболочки над защищаемым каталогом. События дополняют друг друга, процессная телеметрия показывает источник выполнения, а файловая - затронутый ресурс и режим доступа.
+
+Перед следующим сценарием остановим контейнер, чтобы освободить порт `8080`:
+
+```bash
+cd ~/container-security-lab/scenarios/02-writable-bind-mount
+sudo docker compose down
+```
 
 
 
