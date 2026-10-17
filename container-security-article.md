@@ -12,7 +12,7 @@
 2. Воспроизводим сценарий эксплуатации.
 3. Собираем системные события и выделяем признаки атаки.
 4. Настраиваем правило обнаружения и проверяем его на атакующем и штатном сценариях.
-5. Устраняем ошибку конфигурации, если атаку можно предотвратить.
+5. Проверяем качество детекта.
 6. Повторяем эксперимент и сравниваем результат.
 
 Целью статьи является не собрать коллекцию эффектных команд, а последовательно воспроизвести атаку, обнаружить её по телеметрии, проверить качество детекта и по возможности устранить причину.
@@ -1071,7 +1071,7 @@ Docker и Falco должны иметь состояние `active`, конте�
 - Воспроизводятся штатными средствами Linux и Docker без эксплуатации нестабильной уязвимости ядра.
 - Проверяют разные участки границы между контейнером и хостом.
 - Оставляют события, пригодные для анализа и построения правила обнаружения.
-- Допускают исправление конфигурации и повторный эксперимент.
+- Для сценариев, связанных с настройками контейнера, допускают исправление конфигурации и повторный эксперимент.    
 
 Такой выбор позволяет проверить не только конфиденциальность и целостность данных, но и доступность хоста. Просмотр процессов или секретов нарушает конфиденциальность. Изменение файлов хоста затрагивает целостность. Неконтролируемое потребление памяти, процессорного времени или идентификаторов процессов влияет на доступность. Доступ к Docker Engine представляет отдельную опасность, поскольку позволяет управлять контейнерами от имени привилегированной службы.
 
@@ -1207,7 +1207,13 @@ Elasticsearch хранит события, а Kibana позволяет иска
 Для практики подготовлен один намеренно уязвимый образ, загрузим его:
 
 ```text
-container-security-lab/command-injection:1.0-vulnerable
+mkdir -p ~/container-security-lab/scenarios/01-command-injection
+cd ~/container-security-lab/scenarios/01-command-injection
+
+curl --fail --location --remote-name \
+  'https://raw.githubusercontent.com/Scrocisss/Statiya-bezop_kont/main/scenarios/practice-01-command-injection_1.0_linux-amd64/practice-01-command-injection_1.0_linux-amd64.tar.gz'
+curl --fail --location --remote-name \
+  'https://raw.githubusercontent.com/Scrocisss/Statiya-bezop_kont/main/scenarios/practice-01-command-injection_1.0_linux-amd64/practice-01-command-injection_1.0_linux-amd64.tar.gz.sha256'
 ```
 
 Вместе с архивом опубликован файл:
@@ -1216,14 +1222,11 @@ container-security-lab/command-injection:1.0-vulnerable
 practice-01-command-injection_1.0_linux-amd64.tar.gz.sha256
 ```
 
-Поместим оба файла в один каталог и проверим целостность загрузки:
+Проверим целостность загрузки:
 
 ```bash
-mkdir -p ~/container-security-lab/scenarios/01-command-injection
-cd ~/container-security-lab/scenarios/01-command-injection
-
 sha256sum --check \
-  practice-01-command-injection_1.0_linux-amd64.tar.gz.sha256
+practice-01-command-injection_1.0_linux-amd64.tar.gz.sha256
 ```
 
 Ожидаемый результат:
@@ -1232,24 +1235,855 @@ sha256sum --check \
 practice-01-command-injection_1.0_linux-amd64.tar.gz: OK
 ```
 
-Контрольная сумма проверенного архива версии `1.0`:
+Контрольная сумма проверенного архива:
 
 ```text
 0742be51e7a095ed494836fa223b79cc7b8d709637f8c75976f18759d1e13eb2
 ```
 
+Если проверка завершилась ошибкой, использовать архив нельзя, его следует скачать заново. Контрольная сумма подтверждает целостность файла, но не заменяет доверенный канал публикации. Архив и значение суммы должны быть получены из официального репозитория статьи.
+
+Загрузим образ в локальное хранилище Docker. Команда [`docker image load`](https://docs.docker.com/reference/cli/docker/image/load/) принимает в том числе архивы, сжатые программой `gzip`, поэтому предварительно распаковывать файл не нужно.
+
+```bash
+sudo docker image load \
+  --input practice-01-command-injection_1.0_linux-amd64.tar.gz
+```
+
+Docker должен вывести имя загруженного образа:
+
+```text
+Loaded image: container-security-lab/command-injection:1.0-vulnerable
+```
+
+Убедимся, что образ появился в локальном хранилище:
+
+```bash
+sudo docker image inspect \
+  container-security-lab/command-injection:1.0-vulnerable \
+  --format 'id={{.Id}} arch={{.Architecture}} user={{.Config.User}} size={{.Size}}'
+```
+
+Для проверенного архива команда возвращает:
+
+```text
+id=sha256:542031d831bdcc311e6e4cd825960a3c50f3ad473a90c66b34a1d6817c836f52 arch=amd64 user=10001:10001 size=45157282
+```
+
+Поле `user` показывает, что процесс приложения по умолчанию запускается не от имени суперпользователя, а с идентификаторами пользователя и группы `10001`. Это не устраняет командную инъекцию, но ограничивает полномочия выполненной команды.
+
+### Где находится уязвимость
+
+Полный исходный код приложения будет опубликован рядом с архивом. Для понимания уязвимости достаточно рассмотреть функцию, которая запускает `ping`:
+
+```python
+def check_host(host: str) -> dict:
+    command = f"/bin/ping -c 1 -W 1 {host}"
+    result = subprocess.run(
+        command,
+        shell=True,
+        executable="/bin/sh",
+        capture_output=True,
+        text=True,
+        timeout=4,
+        env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
+        check=False,
+    )
+```
+
+Параметр `host` поступает из HTTP-запроса. Форматированная строка помещает его непосредственно в команду, а `shell=True` передаёт полученный текст оболочке. Поэтому символы `;`, `|`, `&&`, перенаправления и подстановки команд интерпретируются не как часть адреса, а как синтаксис оболочки.
+
+Ограничение длины входной строки и четырёхсекундный предел выполнения уменьшают возможность злоупотребления ресурсами, но не исправляют командную инъекцию. Причина уязвимости заключается в смешивании данных с командой, а не в длине введённого значения.
+
+В рамках статьи исправлять исходный код приложения не будем. Этот сценарий нужен как контролируемая точка первоначального доступа, с его помощью мы воспроизведём выполнение команды, изучим дерево процессов и построим правило обнаружения. Способы безопасной разработки веб-приложений выходят за границы статьи.
+
+Теперь из проекта нужно создать и запустить контейнер. Такие параметры, как публикация сетевого порта, ограничения памяти, доступные привилегии и режим файловой системы, не записываются в архив как обязательные настройки хоста. Их задаёт пользователь при каждом создании контейнера.
+
+Для воспроизводимого запуска сохраним эти параметры в файле `compose.yaml`. Сам образ при этом не изменяется и повторно загружать его в репозиторий не требуется.
+
+Перейдём в созданный ранее каталог сценария и откроем новый файл:
+
+```bash
+cd ~/container-security-lab/scenarios/01-command-injection
+vim compose.yaml
+```
+
+Добавим следующую конфигурацию:
+
+```yaml
+name: container-security-command-injection
+
+services:
+  application:
+    image: container-security-lab/command-injection:1.0-vulnerable
+    pull_policy: never
+    container_name: lab-command-injection
+    init: true
+    user: "10001:10001"
+    ports:
+      - "0.0.0.0:8080:8080"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.50
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "2"
+```
+
+Приложение внутри образа уже слушает адрес `0.0.0.0:8080`. Раздел `ports` публикует этот порт на всех сетевых интерфейсах виртуальной машины, поэтому открыть сервис можно и с основной ОС. Адрес `0.0.0.0` используется только для привязки сокета. В браузере или `curl` вместо него нужно указывать настоящий адрес виртуальной машины, например `http://192.168.0.69:8080`.
+
+Мы намеренно открываем сетевой доступ к уязвимому приложению. Виртуальная машина должна находиться в отдельной лабораторной сети и не должна принимать соединения из интернета или рабочей локальной сети.
+
+Остальные параметры ограничивают последствия эксплуатации:
+
+- `pull_policy: never` запрещает Docker искать образ во внешнем реестре. Будет использован именно образ, загруженный из проверенного архива.
+- `init: true` добавляет небольшой начальный процесс, который корректно передаёт сигналы приложению и забирает завершившиеся дочерние процессы.
+- `user: "10001:10001"` явно закрепляет непривилегированного пользователя и группу.
+- `read_only: true` запрещает запись в корневую файловую систему контейнера.
+- `tmpfs` предоставляет приложению временный каталог `/tmp`, но ограничивает его размер и запрещает запуск размещённых в нём файлов.
+- `cap_drop: ALL` удаляет все привилегии Linux, которые Docker обычно оставляет контейнеру.
+- `no-new-privileges:true` запрещает дочерним процессам получать дополнительные полномочия через исполняемые файлы.
+- `pids_limit`, `mem_limit` и `cpus` ограничивают количество процессов, оперативную память и процессорное время.
+- `healthcheck` проверяет HTTP-адрес `/health` изнутри контейнера.
+- Ограничение журнала не позволяет отладочному выводу бесконтрольно занимать место на диске.
+
+Контейнер не получает каталогов и устройств хоста, сокета Docker, дополнительных привилегий или пространств имён хоста. Таким образом, в этой практике мы исследуем выполнение команды внутри контейнера, а не выход из него.
+
+### Запуск приложения
+
+Сначала с помощью Docker Compose проверим структуру файла. При успешной проверке команда ничего не выводит:
+
+```bash
+sudo docker compose config --quiet
+```
+
+Запустим контейнер и дождёмся успешной проверки работоспособности:
+
+```bash
+sudo docker compose up --detach --wait
+sudo docker compose ps
+```
+
+Ожидаемый результат:
+
+```text
+NAME                    IMAGE                                                     STATUS             PORTS
+lab-command-injection   container-security-lab/command-injection:1.0-vulnerable   Up ... (healthy)   0.0.0.0:8080->8080/tcp
+```
+
+С физического компьютера проверим только служебный обработчик, подставив найденный адрес виртуальной машины:
+
+```bash
+http://<адрес_виртуальной_машины>:8080/health
+```
+
+Приложение должно ответить:
+
+```json
+{
+  "status": "ok",
+  "variant": "vulnerable"
+}
+```
+
+![Command injection /health](./images/command-injection-1.png)
+
+### Штатный запрос
+
+Сначала зафиксируем нормальное поведение приложения. Все запросы можно выполнять как из виртуальной машины через `127.0.0.1`, так и с физического компьютера через её лабораторный адрес. Для единообразия следующие команды выполняются внутри основной ОС.
+
+С основной ОС необходимо открыть следующую URI:
+
+```bash
+http://192.168.0.69:8080/ping?host=127.0.0.1
+```
+
+Приложение возвращает полученное значение, сформированную команду, код завершения и вывод `ping`:
+
+```json
+{
+  "variant": "vulnerable",
+  "input": "127.0.0.1",
+  "command": "/bin/ping -c 1 -W 1 127.0.0.1",
+  "returncode": 0,
+  "stdout": "PING 127.0.0.1 (127.0.0.1): 56 data bytes\n64 bytes from 127.0.0.1: seq=0 ttl=42 time=0.077 ms\n\n--- 127.0.0.1 ping statistics ---\n1 packets transmitted, 1 packets received, 0% packet loss\nround-trip min/avg/max = 0.077/0.077/0.077 ms\n",
+  "stderr": ""
+}
+```
+
+Этот запрос станет отрицательным тестом для будущего правила, так как нормальная проверка доступности адреса не должна считаться успешной эксплуатацией.
+
+### Воспроизведение командной инъекции
+
+Теперь после адреса передадим разделитель команд `;` и безопасную диагностическую команду `id`. Можно использовать curl:
+
+```bash
+curl --fail --silent --show-error \
+  --get \
+  --data-urlencode 'host=127.0.0.1; id' \
+  'http://127.0.0.1:8080/ping' | jq
+```
+
+Или просто дописать параметр в ссылке:
+
+```text
+http://192.168.0.69:8080/ping?host=127.0.0.1;id
+```
+
+`curl` кодирует специальные символы для передачи по HTTP. После разбора запроса приложение снова получает исходную строку `127.0.0.1; id` и без проверки помещает её в команду:
+
+```text
+/bin/ping -c 1 -W 1 127.0.0.1; id
+```
+
+В ответе появляется результат второй команды:
+
+```json
+{
+  "variant": "vulnerable",
+  "input": "127.0.0.1;id",
+  "command": "/bin/ping -c 1 -W 1 127.0.0.1;id",
+  "returncode": 0,
+  "stdout": "PING 127.0.0.1 (127.0.0.1): 56 data bytes\n64 bytes from 127.0.0.1: seq=0 ttl=42 time=0.097 ms\n\n--- 127.0.0.1 ping statistics ---\n1 packets transmitted, 1 packets received, 0% packet loss\nround-trip min/avg/max = 0.097/0.097/0.097 ms\nuid=10001(lab) gid=10001(lab) groups=10001(lab)\n",
+  "stderr": ""
+}
+```
+
+Строка с `uid=10001` подтверждает выполнение добавленной команды. Одновременно она показывает границу результата, команда выполняется от имени пользователя приложения внутри контейнера.
+
+Процесс `sh` можно не успеть увидеть, хотя приложение явно запускает `/bin/sh`. Оболочка BusyBox выполняет первую команду, а затем может заменить себя последней внешней командой с помощью системного вызова `execve`. Идентификатор процесса при этом сохраняется, но его имя и исполняемый файл меняются. В результате `sleep` или `id` могут выглядеть непосредственными потомками Python.
+
+Это важно для обнаружения, условие, требующее, чтобы непосредственным родителем подозрительной команды обязательно была оболочка, пропустит часть вариантов эксплуатации.
+
+Взглянем, что события действительно доходят в Elastic, значит мы правильно настроили лабораторный стенд
+
+![Command injection /health](./images/command-injection-2.png)
+
+### Получение исходной телеметрии Falco
+
+Стандартные правила Falco предназначены для широкого набора сред и не обязаны считать каждый дочерний процесс конкретного приложения атакой. Отсутствие уведомления после запроса ещё не означает, что Falco не получил системный вызов. Оно означает лишь, что событие не удовлетворило условиям загруженных правил.
+
+Сначала проверим стандартные уведомления, относящиеся к контейнеру:
+
+```bash
+sudo journalctl \
+  -u falco-modern-bpf.service \
+  --since '5 minutes ago' \
+  --output=cat \
+  --no-pager | \
+  grep -F 'lab-command-injection'
+```
+
+Команда может ничего не вывести. Для построения собственного правила сначала соберём процессы, возникающие только в исследуемой цепочке. Это будет временное правило наблюдения, а не готовый признак атаки.
+
+В конфигурации стенда используется режим `rule_matching: first`: Falco прекращает проверку после первого совпавшего правила. Для лабораторного сравнения включим проверку всех подходящих правил, чтобы стандартное правило не могло скрыть наше пользовательское правило для того же события.
+
+Создадим отдельный файл конфигурации:
+
+```bash
+sudo vim /etc/falco/config.d/98-lab-rule-matching.yaml
+```
+
+Его содержимое:
+
+```yaml
+rule_matching: all
+```
+
+Такой режим требует больше вычислений, поэтому в промышленной среде его включают только после оценки нагрузки. Для небольшого лабораторного стенда он позволяет видеть все совпадения и сравнивать правила независимо друг от друга.
+
+Теперь создадим временное правило:
+
+```bash
+sudo vim /etc/falco/rules.d/01-command-injection-observe.yaml
+```
+
+```yaml
+- list: lab_command_injection_application_processes
+  items: [python, python3]
+
+- list: lab_command_injection_shell_processes
+  items: [sh, ash, bash, dash]
+
+- rule: Laboratory command injection process observation
+  desc: >
+    Records processes started by the deliberately vulnerable laboratory
+    application or by its command shell. This rule is intended for observation,
+    not for use as a final attack detection.
+  condition: >
+    evt.type in (execve, execveat)
+    and container.id != host
+    and container.name = "lab-command-injection"
+    and (
+      proc.pname in (
+        lab_command_injection_application_processes,
+        lab_command_injection_shell_processes
+      )
+      or proc.aname[2] in (lab_command_injection_application_processes)
+    )
+  output: >
+    Laboratory application started a process |
+    evt_type=%evt.type user=%user.name user_uid=%user.uid
+    process=%proc.name proc_exepath=%proc.exepath
+    parent=%proc.pname grandparent=%proc.aname[2]
+    command=%proc.cmdline terminal=%proc.tty
+    container_id=%container.id container_name=%container.name
+    container_image=%container.image.repository
+    container_tag=%container.image.tag
+  priority: NOTICE
+  tags:
+    - container
+    - process
+    - lab_observation
+    - mitre_execution
+    - T1059.004
+```
+
+Ограничение по имени контейнера здесь допустимо, потому что правило предназначено только для наблюдения в известном лабораторном сценарии. Условие учитывает как непосредственного родителя, так и процесс уровнем выше. Это позволяет увидеть команду и в случае создания отдельного дочернего процесса, и в случае замены оболочки через `execve`.
+
+Проверим конфигурацию до перезапуска Falco:
+
+```bash
+sudo falco --dry-run
+```
+
+При успешной проверке файлы `98-lab-rule-matching.yaml` и `01-command-injection-observe.yaml` должны получить отметку `schema validation: ok`, а команда должна завершиться с кодом `0`. Проверить код завершения можно сразу после неё:
+
+```bash
+echo $?
+```
+
+Если выведено `0`, перезапустим службу и убедимся, что она работает:
+
+```bash
+sudo systemctl restart falco-modern-bpf.service
+sudo systemctl --no-pager --full \
+  status falco-modern-bpf.service
+```
+
+### Сравнение штатного и атакующего запросов
+
+Зафиксируем время начала проверки и повторим штатный запрос:
+
+```bash
+http://192.168.0.69:8080/ping?host=127.0.0.1
+```
+
+Затем повторим командную инъекцию:
+
+```bash
+http://192.168.0.69:8080/ping?host=127.0.0.1;id
+```
+
+Выведем только уведомления временного правила и только поля, необходимые для сравнения процессов:
+
+```bash
+sudo journalctl \
+  -u falco-modern-bpf.service \
+  --since "$LAB_OBSERVE_START" \
+  --output=cat \
+  --no-pager | \
+  jq --raw-input --raw-output '
+    fromjson?
+    | select(.rule == "Laboratory command injection process observation")
+    | [
+        .time,
+        .output_fields["proc.name"],
+        .output_fields["proc.pname"],
+        .output_fields["proc.aname[2]"],
+        .output_fields["proc.cmdline"],
+        .output_fields["user.uid"],
+        .output_fields["container.name"]
+      ]
+    | @tsv
+  '
+```
+
+<details>
+<summary>Развернуть вывод команды</summary>
+
+  ```bash
+2026-10-17T17:14:28.539974230Z  sh      python  docker-init     sh -c /bin/ping -c 1 -W 1 127.0.0.1    10001   lab-command-injection
+2026-10-17T17:14:28.541942203Z  ping    python  docker-init     ping -c 1 -W 1 127.0.0.1       10001   lab-command-injection
+2026-10-17T17:14:32.124928183Z  sh      python  docker-init     sh -c /bin/ping -c 1 -W 1 127.0.0.1;id 10001   lab-command-injection
+2026-10-17T17:14:32.126252938Z  ping    sh      python  ping -c 1 -W 1 127.0.0.1       10001   lab-command-injection
+2026-10-17T17:14:32.127886318Z  id      python  docker-init     id      10001 lab-command-injection
+```
+
+</details>
+
+В последовательности штатного запроса должны присутствовать оболочка и `ping`. При атакующем запросе к ним добавляется `id`. Точные значения родителя и процесса уровнем выше зависят от того, создала ли оболочка новый процесс или заменила себя через `execve`, именно поэтому мы сначала собираем фактическую телеметрию.
+
+### Проверка доставки в Elasticsearch и Kibana
+
+Falco отправляет каждое срабатывание временного правила в Falcosidekick, а тот сохраняет его в индексе `falco-*`. Доставка выполняется асинхронно, поэтому после запросов документ может появиться с небольшой задержкой.
+
+Получим последние документы за 15 минут:
+
+![Command injection /health](./images/command-injection-3.png)
+
+Falco зафиксировал системный вызов execve, с помощью которого уязвимое приложение запустило команду id. Процесс выполнялся без терминала от имени пользователя приложения внутри контейнера. Непосредственным родителем стал Python, поскольку оболочка заменила себя запускаемой программой.  
+
+<details>
+<summary>Развернуть событие</summary>
+
+  ```bash
+{
+  "_index": "falco-2026.10.17",
+  "_id": "QELbSqEBABcwyyR9q0ON",
+  "_version": 1,
+  "_source": {
+    "uuid": "27cd68b6-2a10-43d6-826a-f20c68b04407",
+    "output": "17:14:32.127886318: Notice Laboratory application started a process | evt_type=execve user=lab user_uid=10001 process=id proc_exepath=/bin/busybox parent=python grandparent=docker-init command=id terminal=0 container_id=4f5218a5673a container_name=lab-command-injection container_image=container-security-lab/command-injection container_tag=1.0-vulnerable container_id=4f5218a5673a container_name=lab-command-injection container_image_repository=container-security-lab/command-injection container_image_tag=1.0-vulnerable k8s_pod_name=<NA> k8s_ns_name=<NA>",
+    "priority": "Notice",
+    "rule": "Laboratory command injection process observation",
+    "time": "2026-10-17T17:14:32.127886318Z",
+    "output_fields": {
+      "container_id": "4f5218a5673a",
+      "container_image_repository": "container-security-lab/command-injection",
+      "container_image_tag": "1.0-vulnerable",
+      "container_name": "lab-command-injection",
+      "evt_time": 1792257272127886300,
+      "evt_type": "execve",
+      "k8s_ns_name": null,
+      "k8s_pod_name": null,
+      "proc_aname[2]": "docker-init",
+      "proc_cmdline": "id",
+      "proc_exepath": "/bin/busybox",
+      "proc_name": "id",
+      "proc_pname": "python",
+      "proc_tty": 0,
+      "user_name": "lab",
+      "user_uid": 10001
+    },
+    "source": "syscall",
+    "tags": [
+      "T1059.004",
+      "container",
+      "lab_observation",
+      "mitre_execution",
+      "process"
+    ],
+    "hostname": "scrockcontainers",
+    "@timestamp": "2026-10-17T17:14:32.127886318Z"
+  },
+  "fields": {
+    "output_fields.container_name.keyword": [
+      "lab-command-injection"
+    ],
+    "output_fields.proc_name": [
+      "id"
+    ],
+    "output_fields.container_image_tag.keyword": [
+      "1.0-vulnerable"
+    ],
+    "output_fields.proc_tty.keyword": [
+      "0"
+    ],
+    "tags.keyword": [
+      "T1059.004",
+      "container",
+      "lab_observation",
+      "mitre_execution",
+      "process"
+    ],
+    "output_fields.proc_aname[2]": [
+      "docker-init"
+    ],
+    "rule": [
+      "Laboratory command injection process observation"
+    ],
+    "output_fields.evt_time": [
+      1792257272127886300
+    ],
+    "uuid.keyword": [
+      "27cd68b6-2a10-43d6-826a-f20c68b04407"
+    ],
+    "output_fields.proc_pname": [
+      "python"
+    ],
+    "source": [
+      "syscall"
+    ],
+    "output_fields.evt_type.keyword": [
+      "execve"
+    ],
+    "output_fields.proc_exepath": [
+      "/bin/busybox"
+    ],
+    "uuid": [
+      "27cd68b6-2a10-43d6-826a-f20c68b04407"
+    ],
+    "output_fields.proc_aname[2].keyword": [
+      "docker-init"
+    ],
+    "output": [
+      "17:14:32.127886318: Notice Laboratory application started a process | evt_type=execve user=lab user_uid=10001 process=id proc_exepath=/bin/busybox parent=python grandparent=docker-init command=id terminal=0 container_id=4f5218a5673a container_name=lab-command-injection container_image=container-security-lab/command-injection container_tag=1.0-vulnerable container_id=4f5218a5673a container_name=lab-command-injection container_image_repository=container-security-lab/command-injection container_image_tag=1.0-vulnerable k8s_pod_name=<NA> k8s_ns_name=<NA>"
+    ],
+    "output_fields.proc_exepath.keyword": [
+      "/bin/busybox"
+    ],
+    "output_fields.user_uid.keyword": [
+      "10001"
+    ],
+    "hostname": [
+      "scrockcontainers"
+    ],
+    "output_fields.container_image_repository": [
+      "container-security-lab/command-injection"
+    ],
+    "output_fields.container_id.keyword": [
+      "4f5218a5673a"
+    ],
+    "output_fields.container_image_repository.keyword": [
+      "container-security-lab/command-injection"
+    ],
+    "output_fields.proc_cmdline": [
+      "id"
+    ],
+    "output_fields.container_name": [
+      "lab-command-injection"
+    ],
+    "output_fields.proc_pname.keyword": [
+      "python"
+    ],
+    "source.keyword": [
+      "syscall"
+    ],
+    "output_fields.proc_cmdline.keyword": [
+      "id"
+    ],
+    "priority.keyword": [
+      "Notice"
+    ],
+    "output_fields.proc_tty": [
+      "0"
+    ],
+    "output_fields.container_image_tag": [
+      "1.0-vulnerable"
+    ],
+    "output_fields.evt_type": [
+      "execve"
+    ],
+    "output_fields.user_uid": [
+      "10001"
+    ],
+    "output.keyword": [
+      "17:14:32.127886318: Notice Laboratory application started a process | evt_type=execve user=lab user_uid=10001 process=id proc_exepath=/bin/busybox parent=python grandparent=docker-init command=id terminal=0 container_id=4f5218a5673a container_name=lab-command-injection container_image=container-security-lab/command-injection container_tag=1.0-vulnerable container_id=4f5218a5673a container_name=lab-command-injection container_image_repository=container-security-lab/command-injection container_image_tag=1.0-vulnerable k8s_pod_name=<NA> k8s_ns_name=<NA>"
+    ],
+    "priority": [
+      "Notice"
+    ],
+    "tags": [
+      "T1059.004",
+      "container",
+      "lab_observation",
+      "mitre_execution",
+      "process"
+    ],
+    "output_fields.container_id": [
+      "4f5218a5673a"
+    ],
+    "@timestamp": [
+      "2026-10-17T17:14:32.127Z"
+    ],
+    "output_fields.user_name.keyword": [
+      "lab"
+    ],
+    "output_fields.user_name": [
+      "lab"
+    ],
+    "time": [
+      "2026-10-17T17:14:32.127Z"
+    ],
+    "hostname.keyword": [
+      "scrockcontainers"
+    ],
+    "output_fields.proc_name.keyword": [
+      "id"
+    ],
+    "rule.keyword": [
+      "Laboratory command injection process observation"
+    ]
+  }
+}
+```
+
+</details>
+
+### Что показало наблюдение
+
+В Kibana появилось уведомление временного правила `Laboratory command injection process observation`. В нём важны не только имя выполненной команды, но и контекст процесса:
+
+```text
+rule:          Laboratory command injection process observation
+evt_type:      execve
+process:       id
+parent:        python
+grandparent:   docker-init
+command:       id
+user:          lab
+user_uid:      10001
+terminal:      0
+container:     lab-command-injection
+image:         container-security-lab/command-injection:1.0-vulnerable
+```
+
+Что это доказывает:
+
+- команда из HTTP-параметра действительно была выполнена;
+- выполнение произошло внутри нужного контейнера;
+- команда получила права пользователя `lab`, UID `10001`;
+- это не административный запуск через `docker exec`;
+- полагаться только на наличие оболочки в цепочке нельзя.
+
+Последний вывод особенно важен. В данном событии непосредственным родителем `id` стал процесс `python`, хотя приложение запускает строку через `/bin/sh`. Это не означает, что оболочка не участвовала в выполнении. Она обработала строку `/bin/ping ...; id`, а перед запуском последней команды заменила собственный образ процессом `id` с помощью `execve`. Идентификатор процесса при такой замене сохраняется, поэтому новым непосредственным родителем оказывается Python-приложение.
+
+В других случаях оболочка может создать отдельный дочерний процесс, и тогда цепочка будет выглядеть как `python - sh - команда`. Следовательно, условие вида `proc.pname = sh` пропустит часть атак. Для правила важнее установить происхождение процесса от Python-приложения, а не рассчитывать на неизменную глубину дерева процессов.
+
+Теперь данных достаточно для окончательного правила. Оно должно обнаруживать любой неожиданный исполняемый процесс среди потомков Python-приложения, разрешая штатный `ping`. При этом правило не должно быть привязано только к имени `id`, иначе другая команда обойдёт детект.
+
+### Модель окончательного правила
+
+У приложения очень простое штатное поведение: обработчик запускает оболочку, а та - `ping`. Поэтому для этого конкретного сервиса можно сформулировать ожидаемое множество процессов:
+
+Фактическая глубина дерева может меняться из-за оптимизации оболочки, но набор разрешённых программ остаётся тем же. Появление `id`, `uname`, `cat`, `wget` или другого исполняемого файла среди потомков приложения не требуется функции проверки узла и должно создавать уведомление.
+
+Такой подход представляет собой список разрешённого поведения приложения. Он надёжнее правила, перечисляющего отдельные атакующие команды: список инструментов, которые может выбрать атакующий, практически не ограничен, а штатный набор процессов данного сервиса известен заранее.
+
+Правило будет использовать следующие признаки:
+
+1. Событие относится к запуску нового исполняемого образа - `execve` или `execveat`.
+2. Процесс работает в контейнере `lab-command-injection`.
+3. Среди его предков присутствует `python` или `python3`.
+4. Имя запущенного процесса отсутствует в списке ожидаемых процессов.
+
+Имя контейнера здесь используется для ограничения правила рамками лабораторного приложения. В промышленной среде такое условие обычно заменяют устойчивым признаком рабочей нагрузки, а именно меткой оркестратора, пространством имён, именем сервиса или проверенным набором образов.
+
+### Замена временного правила окончательным
+
+Временное правило выполнило свою задачу, оно позволило увидеть штатную и атакующую последовательности процессов. Оставлять его включённым не следует, иначе каждый обычный запуск `ping` продолжит создавать уведомление.
+
+Сохраним файл, но изменим его расширение. Falco версии 0.45 загружает из каталога правил только файлы с расширением `.yaml` и `.yml`, поэтому копия останется рядом и не будет участвовать в проверке событий.
+
+```bash
+sudo mv /etc/falco/rules.d/01-command-injection-observe.yaml /etc/falco/rules.d/01-command-injection-observe.yaml.disabled
+```
+
+Создадим файл окончательного правила:
+
+```bash
+sudo vim /etc/falco/rules.d/01-command-injection.yaml
+```
+
+```yaml
+- list: lab_command_injection_application_processes
+  items: [python, python3]
+
+- list: lab_command_injection_expected_processes
+  items: [ping, sh, ash, bash, dash]
+
+- rule: Unexpected process from laboratory web application
+  desc: >
+    Detects a process outside the expected allowlist when it is started by
+    the deliberately vulnerable Python application in the laboratory container.
+  condition: >
+    evt.type in (execve, execveat)
+    and container.id != host
+    and container.name = "lab-command-injection"
+    and proc.aname in (lab_command_injection_application_processes)
+    and not proc.name in (lab_command_injection_expected_processes)
+  output: >
+    Unexpected process started by laboratory web application |
+    evt_type=%evt.type user=%user.name user_uid=%user.uid
+    process=%proc.name proc_exepath=%proc.exepath
+    parent=%proc.pname grandparent=%proc.aname[2]
+    command=%proc.cmdline terminal=%proc.tty
+  priority: WARNING
+  tags:
+    - container
+    - process
+    - command_injection
+    - mitre_execution
+    - T1059.004
+```
+
+Поле [`proc.aname`](https://falco.org/docs/reference/rules/supported-fields/) без числового индекса проверяет имена во всей цепочке предков. Поэтому правило не зависит от того, находится ли `python` непосредственно над запущенной командой или между ними сохранился процесс оболочки.
+
+Оболочки `sh`, `ash`, `bash` и `dash` внесены в разрешённый список потому, что текущая уязвимая реализация использует `/bin/sh` даже при штатном запросе. `ping` является единственной внешней программой, которая нужна функции проверки узла. Это разрешение описывает фактическое поведение именно этой версии приложения, а не универсальный список безопасных программ.
+
+В поле `output` намеренно не добавлены сведения о контейнере. В используемой конфигурации Falco параметр `append_output.suggested_output` уже дополняет уведомление полями `container.id`, `container.name`, `container.image.repository` и `container.image.tag`. Если перечислить их ещё раз, текстовое описание будет содержать дубликаты, как это было во временном правиле.
+
+Приоритет `WARNING` выбран потому, что неожиданный дочерний процесс является убедительным признаком нарушения модели приложения, но сам по себе ещё не доказывает выход из контейнера или получение прав на хосте.
+
+Метка [`T1059.004`](https://attack.mitre.org/techniques/T1059/004/) связывает событие с техникой MITRE ATT&CK «Unix Shell». Техника [`T1190`](https://attack.mitre.org/techniques/T1190/) описывает эксплуатацию публично доступного приложения и подходит для контекста всего сценария, но системное событие `execve` само по себе не доказывает, что первоначальный ввод пришёл именно через публичный сетевой интерфейс.
+
+### Проверка синтаксиса и загрузка правила
+
+Сначала проверим все файлы конфигурации и правил без перезапуска работающей службы:
+
+```bash
+sudo falco --dry-run
+echo $?
+```
+
+В выводе файл `/etc/falco/rules.d/01-command-injection.yaml` должен получить отметку `schema validation: ok`, а вторая команда должна вывести `0`. Если Falco сообщает об ошибке, перезапускать службу нельзя, сначала необходимо исправить указанную строку.
+
+После успешной проверки перезапустим Falco и убедимся, что служба работает:
+
+```bash
+sudo systemctl restart falco-modern-bpf.service
+sudo systemctl --no-pager --full \
+  status falco-modern-bpf.service
+```
+
+Отдельно проверим, что загружено окончательное, а не временное правило:
+
+```bash
+sudo journalctl \
+  -u falco-modern-bpf.service \
+  --since '2 minutes ago' \
+  --no-pager | \
+  grep -E '01-command-injection|error|Error|ERROR'
+```
+
+В журнале должен присутствовать файл `01-command-injection.yaml`. Файл с окончанием `.yaml.disabled` загружаться не должен. Сообщений об ошибках разбора правила быть не должно.
+
+### Проверка правила на четырёх сценариях
+
+Одного успешного срабатывания недостаточно. Необходимо проверить как обнаружение разных команд, так и отсутствие уведомлений при разрешённой работе и при административном запуске, не связанном с уязвимостью приложения.
+
+Зафиксируем время начала эксперимента:
+
+```bash
+LAB_RULE_TEST_START=$(date --iso-8601=seconds)
+printf '%s\n' "$LAB_RULE_TEST_START"
+```
+
+#### 1. Штатный запрос
+
+Отправим допустимый адрес без дополнительных команд:
+
+```bash
+http://192.168.0.69:8080/ping?host=127.0.0.1
+```
+
+Приложение запустит оболочку и `ping`. Оба процесса входят в разрешённый список, поэтому окончательное правило не должно сработать.
+
+#### 2. Инъекция с командой `id`
+
+Повторим уже изученный атакующий запрос:
+
+```bash
+http://192.168.0.69:8080/ping?host=127.0.0.1;id
+```
+
+В HTTP-ответе должен появиться результат `id`, а Falco должен создать уведомление о неожиданном процессе `id`.
+
+#### 3. Инъекция с другой командой
+
+Проверим, что правило не привязано к единственному имени `id`:
+
+```bash
+http://192.168.0.69:8080/ping?host=127.0.0.1;whoami
+```
+
+Эта команда должна создать второе уведомление - теперь для процесса `whoami`. Если правило обнаруживает только `id`, оно описывает один тестовый пример, а не нежелательное поведение приложения.
+
+#### 4. Административный запуск через `docker exec`
+
+Выполним ту же команду `id` непосредственно через Docker:
+
+```bash
+sudo docker exec lab-command-injection id
+```
+
+Этот процесс выполняется внутри того же контейнера и от имени того же пользователя, но не является потомком Python-приложения. Окончательное правило не должно создавать для него уведомление. Такая проверка показывает, зачем в условии используется происхождение процесса, а не только сочетание имени контейнера и имени команды.
+
+### Проверка результата в журнале Falco
+
+Выведем срабатывания только окончательного правила, появившиеся после начала проверки:
+
+```bash
+sudo journalctl \
+  -u falco-modern-bpf.service \
+  --since "$LAB_RULE_TEST_START" \
+  --output=cat \
+  --no-pager | \
+  jq --raw-input --raw-output '
+    fromjson?
+    | select(.rule == "Unexpected process from laboratory web application")
+    | [
+        .time,
+        .output_fields["proc.name"],
+        .output_fields["proc.pname"],
+        .output_fields["proc.aname[2]"],
+        .output_fields["proc.cmdline"],
+        .output_fields["user.uid"],
+        .output_fields["container.name"]
+      ]
+    | @tsv
+  '
+```
+
+<details>
+<summary>Развернуть событие</summary>
+
+  ```bash
+2026-10-17T18:33:02.813927386Z  id      python  docker-init     id      10001 lab-command-injection
+2026-10-17T18:33:13.028352117Z  whoami  python  docker-init     whoami  10001 lab-command-injection
+```
+
+</details>
 
 
+Ожидаются две строки: одна для `id`, вторая для `uname`. Штатный `ping` и команда `id`, запущенная через `docker exec`, в этом выводе появиться не должны.
 
+### Проверка результата в Kibana
 
+Доставка уведомлений через Falcosidekick выполняется асинхронно, поэтому перед поиском дадим Elasticsearch несколько секунд на индексирование документов. Затем откроем в Kibana раздел `Discover`, выберем представление `Falco events` и установим интервал времени, включающий эксперимент.
 
+В строке KQL зададим фильтр:
 
+```text
+rule : "Unexpected process from laboratory web application"
+and output_fields.container_name : "lab-command-injection"
+```
 
+![Command injection /health](./images/command-injection-4.png)
 
+### Границы детекта
 
+Получившееся правило качественно решает задачу лабораторного сценария, но его границы необходимо обозначить явно.
 
+- Правило обнаруживает запуск нового исполняемого файла. Команда, реализованная встроенной функцией оболочки, например `cd`, может не создать отдельного события `execve`.
+- Разрешение основано на имени процесса. Если атакующий сможет поместить вредоносную программу под разрешённым именем `ping`, одного этого правила будет недостаточно.
+- Изменение приложения может добавить легитимный вспомогательный процесс. Тогда разрешённый список потребуется пересмотреть после анализа нового поведения, а не расширять автоматически.
+- Срабатывание подтверждает отклонение от модели процесса, но не доказывает выход из контейнера, закрепление в системе или доступ к данным хоста.
+- Условие с именем контейнера подходит для воспроизводимой лаборатории. В динамической промышленной среде идентификацию рабочей нагрузки нужно строить на доступных там устойчивых метаданных.
 
-
+Эти ограничения не делают правило бесполезным. Они определяют, на какой вопрос оно отвечает: «Запустило ли это веб-приложение программу, которой нет в его штатной модели процессов?» Для наблюдаемой командной инъекции ответ однозначен.
 
 
 
