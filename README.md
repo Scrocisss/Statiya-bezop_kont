@@ -2136,6 +2136,1057 @@ and output_fields.container_name : "lab-command-injection"
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Практика 2. Изменение файлов хоста через подключённый каталог
+
+### Что исследуем
+
+В первой практике командная инъекция дала атакующему выполнение команд внутри контейнера. Сам контейнер при этом не имел доступа к каталогам хоста, сокету Docker, устройствам или пространствам имён хоста. Команда `id` подтвердила первоначальный доступ, но не показала нарушения контейнерной границы.
+
+Теперь сохраним тот же контролируемый первоначальный доступ и изменим только один параметр запуска: подключим в контейнер каталог хоста с правом записи. Это позволит отделить последствия командной инъекции от последствий небезопасного `bind mount`.
+
+[`Bind mount`](https://docs.docker.com/engine/storage/bind-mounts/) связывает существующий путь хоста с путём внутри контейнера. Оба пути указывают на одни и те же объекты файловой системы. Если контейнер изменяет файл в такой точке монтирования, изменение происходит не в его записываемом слое OverlayFS, а непосредственно в каталоге хоста.
+
+Для эксперимента создадим только специальный лабораторный каталог:
+
+![Command injection /health](./images/writable-bind-mount.png)
+
+Корневую файловую систему хоста, `/etc`, домашние каталоги пользователей и другие настоящие системные пути подключать не будем. Безопасный маркер позволяет доказать влияние на хост без изменения его рабочей конфигурации.
+
+Причину сценария можно связать с [CWE-732](https://cwe.mitre.org/data/definitions/732.html), критическому ресурсу назначены более широкие права, чем требуется. Доступ ресурса из непредусмотренной области также соответствует [CWE-668](https://cwe.mitre.org/data/definitions/668.html). В MITRE ATT&CK использование подключённой файловой системы хоста рассматривается в контексте техники [T1611 «Escape to Host»](https://attack.mitre.org/techniques/T1611/).
+
+При этом важно не преувеличивать результат. Процесс не покидает пространства имён контейнера и не получает оболочку на хосте. Доступ к файлу хоста возникает потому, что Docker заранее провёл этот ресурс через границу изоляции. В нашей конфигурации воздействие ограничено одним подготовленным каталогом.
+
+### Цель эксперимента
+
+Нужно последовательно доказать четыре утверждения:
+
+1. Контейнер видит лабораторный файл хоста по другому пути.
+2. При подключении `read-write` процесс с UID `10001` способен изменить этот файл.
+3. Falco фиксирует успешное открытие файла для записи, а уведомление попадает в Elasticsearch и Kibana.
+4. После перевода точки монтирования в режим `read-only` тот же запрос завершается ошибкой, а контрольная сумма файла хоста не меняется.
+
+Исходный код приложения исправлять не будем. Командная инъекция остаётся контролируемым способом выполнить действие внутри контейнера, а исправлению подлежит только конфигурация точки монтирования.
+
+### Подготовка отдельного образа
+
+Для сценария подготовлен отдельный архив. Приложение внутри него повторяет уязвимую реализацию из первой практики, но образ имеет собственное имя и метки практики 2. Благодаря этому эксперимент можно выполнить независимо, а события двух контейнеров не будут смешиваться.
+
+Перед началом остановим контейнер первой практики, чтобы освободить порт `8080`. Образ и собранные события при этом сохранятся:
+
+```bash
+cd ~/container-security-lab/scenarios/01-command-injection
+sudo docker compose down
+```
+
+Создадим каталог второго сценария:
+
+```bash
+mkdir -p ~/container-security-lab/scenarios/02-writable-bind-mount
+cd ~/container-security-lab/scenarios/02-writable-bind-mount
+```
+
+После публикации файлов в репозитории загрузим архив и его контрольную сумму:
+
+```bash
+curl --fail --location --remote-name 'https://raw.githubusercontent.com/Scrocisss/Statiya-bezop_kont/main/scenarios/practice-02-writable-bind-mount_1.0_linux-amd64/practice-02-writable-bind-mount_1.0_linux-amd64.tar.gz'
+curl --fail --location --remote-name 'https://raw.githubusercontent.com/Scrocisss/Statiya-bezop_kont/main/scenarios/practice-02-writable-bind-mount_1.0_linux-amd64/practice-02-writable-bind-mount_1.0_linux-amd64.tar.gz.sha256'
+```
+
+Проверим целостность:
+
+```bash
+sha256sum --check practice-02-writable-bind-mount_1.0_linux-amd64.tar.gz.sha256
+```
+
+Ожидаемый результат:
+
+```text
+practice-02-writable-bind-mount_1.0_linux-amd64.tar.gz: OK
+```
+
+Контрольная сумма проверенного архива:
+
+```text
+80c1dffb09c008504d60f610632c58c4e5b0d21b31b47c2b302c4f8b3dd66b1c
+```
+
+Загрузим образ в локальное хранилище Docker:
+
+```bash
+sudo docker image load --input practice-02-writable-bind-mount_1.0_linux-amd64.tar.gz
+```
+
+Ожидаемое имя образа:
+
+```text
+container-security-lab/writable-bind-mount:1.0-vulnerable
+```
+
+Проверим архитектуру, пользователя и метки:
+
+```bash
+sudo docker image inspect container-security-lab/writable-bind-mount:1.0-vulnerable --format 'id={{.Id}} arch={{.Architecture}} user={{.Config.User}} size={{.Size}} practice={{index .Config.Labels "io.container-security-lab.practice"}} variant={{index .Config.Labels "io.container-security-lab.variant"}}'
+```
+
+<details>
+<summary>Развернуть событие</summary>
+
+  ```bash
+scrock_@scrockcontainers:~/container-security-lab/scenarios/02-writable-bind-mount$ sudo docker image inspect container-security-lab/writable-bind-mount:1.0-vulnerable --format 'id={{.Id}} arch={{.Architecture}} user={{.Config.User}} size={{.Size}} practice={{index .Config.Labels "io.container-security-lab.practice"}} variant={{index .Config.Labels "io.container-security-lab.variant"}}'
+
+id=sha256:cfc663e7ef6022d3f537cfaee3d8d7c372c5c464bea06d2dfad309532f8b729b arch=amd64 user=10001:10001 size=100049432 practice=02 variant=vulnerable
+```
+
+</details>
+
+Для проверенного образа значения `arch`, `user`, `practice` и `variant` должны быть равны `amd64`, `10001:10001`, `02` и `vulnerable`. Представление идентификатора образа может отличаться между классическим и containerd-хранилищем Docker, поэтому целостность дистрибутива проверяем по SHA-256 самого архива.
+
+### Подготовка безопасного каталога хоста
+
+Создадим отдельный каталог, который не используется операционной системой или другими приложениями:
+
+```bash
+sudo install -d -o 10001 -g 10001 -m 0750 /srv/container-security-lab/practice-02
+```
+
+UID и GID `10001` совпадают с пользователем приложения внутри образа. Ядро проверяет права по числовым идентификаторам, а не по текстовым именам пользователей. Поэтому пользователь `lab` внутри контейнера получает права владельца на этот каталог, даже если на хосте для UID `10001` нет записи в `/etc/passwd`.
+
+Создадим контрольный файл:
+
+```bash
+sudo vim /srv/container-security-lab/practice-02/host-marker.txt
+```
+
+```
+owner=host
+state=original
+```
+
+```bash
+sudo chown 10001:10001 /srv/container-security-lab/practice-02/host-marker.txt
+sudo chmod 0640 /srv/container-security-lab/practice-02/host-marker.txt
+```
+
+Зафиксируем содержимое, права, inode и контрольную сумму до запуска контейнера:
+
+```bash
+sudo cat /srv/container-security-lab/practice-02/host-marker.txt
+sudo stat --format='inode=%i owner=%U(%u) group=%G(%g) mode=%A(%a) size=%s mtime=%y' /srv/container-security-lab/practice-02/host-marker.txt
+sudo sha256sum /srv/container-security-lab/practice-02/host-marker.txt
+```
+
+<details>
+<summary>Развернуть событие</summary>
+
+  ```bash
+scrock_@scrockcontainers:~/container-security-lab/scenarios/02-writable-bind-mount$ sudo cat /srv/container-security-lab/practice-02/host-marker.txt
+owner=host
+state=original
+scrock_@scrockcontainers:~/container-security-lab/scenarios/02-writable-bind-mount$ sudo stat --format='inode=%i owner=%U(%u) group=%G(%g) mode=%A(%a) size=%s mtime=%y' /srv/container-security-lab/practice-02/host-marker.txt
+inode=1441797 owner=UNKNOWN(10001) group=UNKNOWN(10001) mode=-rw-r-----(640) size=26 mtime=2026-10-17 19:33:34.661448342 +0000
+scrock_@scrockcontainers:~/container-security-lab/scenarios/02-writable-bind-mount$ sudo sha256sum /srv/container-security-lab/practice-02/host-marker.txt
+525c7030ae45224b7ef422b9afee3bc4fe559bc463d6dcebfd59d8cad0c77838  /srv/container-security-lab/practice-02/host-marker.txt
+```
+
+</details>
+
+Для указанного содержимого контрольная сумма равна:
+
+```text
+525c7030ae45224b7ef422b9afee3bc4fe559bc463d6dcebfd59d8cad0c77838
+```
+
+Сохранение inode поможет показать, что контейнер изменил тот же объект файловой системы, а не одноимённую копию в собственном слое.
+
+### Уязвимая конфигурация запуска
+
+В каталоге сценария создадим файл:
+
+```bash
+vim compose.yaml
+```
+
+Поместим в него следующую конфигурацию:
+
+```yaml
+name: container-security-writable-bind-mount
+
+services:
+  application:
+    image: container-security-lab/writable-bind-mount:1.0-vulnerable
+    pull_policy: never
+    container_name: lab-writable-bind-mount
+    init: true
+    user: "10001:10001"
+    ports:
+      - "0.0.0.0:8080:8080"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    volumes:
+      - type: bind
+        source: /srv/container-security-lab/practice-02
+        target: /mnt/host-data
+        read_only: false
+        bind:
+          propagation: rprivate
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.50
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)
+      interval: 10s
+      timeout: 8s
+      retries: 10
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "2"
+```
+
+Здесь присутствуют два разных параметра `read_only`, которые нельзя смешивать:
+
+- `read_only: true` на уровне сервиса делает корневую файловую систему контейнера доступной только для чтения;
+- `read_only: false` внутри описания тома оставляет конкретный `bind mount` записываемым.
+
+Таким образом, запрет записи в корневой слой контейнера не защищает подключённый каталог. Точки монтирования имеют собственные параметры доступа и перекрывают каталог в файловой системе образа.
+
+Режим распространения `rprivate` не позволяет событиям монтирования распространяться между этой точкой и другими пространствами монтирования. Он полезен, но не запрещает обычную запись в уже подключённый каталог.
+
+Контейнер по-прежнему работает без дополнительных Linux-привилегий и от непривилегированного UID. Для изменения файла ему не требуются `root` или `CAP_SYS_ADMIN`: достаточно прав на сам объект и записываемой точки монтирования.
+
+### Запуск и проверка точки монтирования
+
+Проверим синтаксис и запустим контейнер:
+
+```bash
+sudo docker compose config --quiet
+sudo docker compose up --detach --wait
+sudo docker compose ps
+```
+
+Убедимся, что Docker действительно создал `bind mount` с правом записи:
+
+```bash
+sudo docker inspect lab-writable-bind-mount --format '{{json .Mounts}}' | jq
+```
+
+В описании нужной точки должны присутствовать значения:
+
+```json
+[
+  {
+    "Type": "bind",
+    "Source": "/srv/container-security-lab/practice-02",
+    "Destination": "/mnt/host-data",
+    "Mode": "",
+    "RW": true,
+    "Propagation": "rprivate"
+  }
+]
+```
+
+Поле `RW: true` является главным признаком исследуемой конфигурации. Вывод `docker inspect` показывает фактически применённые параметры, тогда как `compose.yaml` показывает только намерение пользователя.
+
+Проверим пользователя приложения и файл со стороны контейнера:
+
+```bash
+sudo docker exec lab-writable-bind-mount id
+sudo docker exec lab-writable-bind-mount stat -c 'inode=%i uid=%u gid=%g mode=%A size=%s' /mnt/host-data/host-marker.txt
+sudo docker exec lab-writable-bind-mount cat /mnt/host-data/host-marker.txt
+```
+
+<details>
+<summary>Развернуть событие</summary>
+
+  ```bash
+scrock_@scrockcontainers:~/container-security-lab/scenarios/02-writable-bind-mount$ sudo docker exec lab-writable-bind-mount id
+uid=10001(lab) gid=10001(lab) groups=10001(lab)
+scrock_@scrockcontainers:~/container-security-lab/scenarios/02-writable-bind-mount$ sudo docker exec lab-writable-bind-mount stat -c 'inode=%i uid=%u gid=%g mode=%A size=%s' /mnt/host-data/host-marker.txt
+inode=1441797 uid=10001 gid=10001 mode=-rw-r----- size=26
+scrock_@scrockcontainers:~/container-security-lab/scenarios/02-writable-bind-mount$ sudo docker exec lab-writable-bind-mount cat /mnt/host-data/host-marker.txt
+owner=host
+state=original
+```
+
+</details>
+
+
+Номер inode внутри контейнера должен совпасть с номером, полученным командой `stat` на хосте. Это прямое подтверждение того, что обе стороны обращаются к одному объекту.
+
+> **ПРИШЛИТЕ ВЫВОД № 3.** Нужны `docker compose ps`, JSON из `docker inspect`, результат `id` и обе проверки файла из контейнера.
+
+### Штатный запрос
+
+Сначала выполним обычную проверку адреса:
+
+```bash
+curl --fail --silent --show-error \
+  --get \
+  --data-urlencode 'host=127.0.0.1' \
+  'http://127.0.0.1:8080/ping' | jq
+```
+
+После неё файл хоста не должен измениться:
+
+```bash
+sudo sha256sum \
+  /srv/container-security-lab/practice-02/host-marker.txt
+```
+
+Ожидается исходная сумма `525c7030...c77838`. Этот запрос станет отрицательным тестом для будущего правила файловой записи.
+
+### Чтение файла через подключённый каталог
+
+Сначала посмотрим, способен ли скомпрометированный процесс прочитать ресурс хоста:
+
+```bash
+curl --fail --silent --show-error \
+  --get \
+  --data-urlencode 'host=127.0.0.1; cat /mnt/host-data/host-marker.txt' \
+  'http://127.0.0.1:8080/ping' | jq
+```
+
+В поле `stdout` после результата `ping` должны появиться строки:
+
+```text
+owner=host
+state=original
+```
+
+Так мы подтверждаем нарушение границы конфиденциальности. Право только на чтение уже может раскрыть конфигурацию, токены, резервные копии или данные другого приложения. Однако основной объект этой практики — изменение файла, поэтому окончательное правило будет контролировать успешную запись.
+
+Команда `cat` является отдельным процессом и может вызвать правило из первой практики. Это полезная корреляция, но она не заменяет файловый детект: запись можно выполнить встроенной командой оболочки без запуска `cat`.
+
+### Изменение файла хоста
+
+Для проверки целостности используем встроенную команду оболочки `printf` и перенаправление `>`:
+
+```bash
+curl --fail --silent --show-error \
+  --get \
+  --data-urlencode 'host=127.0.0.1; printf "owner=host\nstate=modified-by-container\n" > /mnt/host-data/host-marker.txt' \
+  'http://127.0.0.1:8080/ping' | jq
+```
+
+При успешной записи поле `returncode` будет равно `0`, а `stderr` останется пустым. `printf` в BusyBox `sh` является встроенной командой, поэтому для неё может не появиться отдельный процесс `printf`. Файл открывает для записи сама оболочка. Это показывает, почему правила запуска процессов недостаточно для контроля файловой целостности.
+
+Проверим файл непосредственно на хосте:
+
+```bash
+sudo cat \
+  /srv/container-security-lab/practice-02/host-marker.txt
+
+sudo stat \
+  --format='inode=%i owner=%U(%u) group=%G(%g) mode=%A(%a) size=%s mtime=%y' \
+  /srv/container-security-lab/practice-02/host-marker.txt
+
+sudo sha256sum \
+  /srv/container-security-lab/practice-02/host-marker.txt
+```
+
+Ожидаемое содержимое:
+
+```text
+owner=host
+state=modified-by-container
+```
+
+Контрольная сумма такого файла:
+
+```text
+26f98559970a8433c79e9572700f780d4a5003c26291d5180d96ba6e4a1602e2
+```
+
+Если inode остался прежним, а содержимое, размер, время изменения и контрольная сумма поменялись, контейнер действительно перезаписал исходный объект хоста.
+
+> **ПРИШЛИТЕ ВЫВОД № 4.** Нужны JSON-ответ атакующего HTTP-запроса и результаты `cat`, `stat`, `sha256sum` на хосте после записи.
+
+### Что уже доказано
+
+К этому моменту можно сделать три вывода:
+
+- непривилегированный процесс контейнера изменил файл, физически расположенный на хосте;
+- `read_only: true` для корневой файловой системы контейнера не защитил отдельный записываемый `bind mount`;
+- для воздействия не понадобились дополнительные capabilities, привилегированный режим или эксплуатация ядра.
+
+Это не случайное свойство уязвимого образа. Docker по умолчанию предоставляет bind mount на чтение и запись, если пользователь явно не выбрал режим `read-only`.
+
+### Получение файловой телеметрии Falco
+
+Сначала посмотрим, создало ли одно из стандартных правил уведомление о нашем файле:
+
+```bash
+sudo journalctl \
+  -u falco-modern-bpf.service \
+  --since '5 minutes ago' \
+  --output=cat \
+  --no-pager | \
+  grep -F '/mnt/host-data'
+```
+
+Команда может ничего не вывести. Произвольный каталог приложения не является универсально опасным путём: многие контейнеры штатно записывают данные в подключённые тома. Контекст о том, что именно этот каталог должен быть доступен контейнеру только для чтения, известен владельцу приложения, но неизвестен стандартному набору правил Falco.
+
+Как и в первой практике, сначала создадим широкое временное правило наблюдения. Оно покажет фактический тип события, путь, процесс и флаги открытия файла на нашем стенде.
+
+```bash
+sudo vim \
+  /etc/falco/rules.d/02-writable-bind-mount-observe.yaml
+```
+
+Содержимое файла:
+
+```yaml
+- rule: Laboratory container file write observation
+  desc: >
+    Records successful file opens for writing in the writable bind mount
+    laboratory container. This is an observation rule, not a final detection.
+  condition: >
+    evt.type in (open, openat, openat2)
+    and evt.dir=<
+    and evt.is_open_write=true
+    and fd.typechar='f'
+    and evt.rawres>=0
+    and container.id != host
+    and container.name = "lab-writable-bind-mount"
+  output: >
+    Laboratory container opened a file for writing |
+    evt_type=%evt.type result=%evt.res raw_result=%evt.rawres
+    file=%fd.name directory=%fd.directory flags=%evt.arg.flags
+    process=%proc.name proc_exepath=%proc.exepath
+    parent=%proc.pname command=%proc.cmdline
+    user=%user.name user_uid=%user.uid
+  priority: NOTICE
+  tags:
+    - container
+    - filesystem
+    - lab_observation
+    - mitre_privilege_escalation
+    - T1611
+```
+
+Поле [`evt.is_open_write`](https://falco.org/docs/rules/supported-fields/) истинно для событий `open`, `openat` и `openat2`, когда файл открывается с возможностью записи. Условие `evt.dir=<` выбирает событие выхода из системного вызова, когда уже известен его результат. Проверка `evt.rawres>=0` оставляет только успешные открытия, а `fd.typechar='f'` исключает каталоги, сокеты и другие типы дескрипторов.
+
+На этом этапе путь намеренно не ограничен `/mnt/host-data`. Сначала необходимо подтвердить, в каком виде Falco показывает путь bind mount в фактическом событии. После этого сузим окончательное правило.
+
+Проверим конфигурацию и перезапустим Falco:
+
+```bash
+sudo falco --dry-run
+echo $?
+
+sudo systemctl restart falco-modern-bpf.service
+sudo systemctl --no-pager --full \
+  status falco-modern-bpf.service
+```
+
+Файл правила должен получить отметку `schema validation: ok`, код завершения должен быть равен `0`, а служба — перейти в состояние `active (running)`.
+
+### Повторная запись под наблюдением
+
+С хоста вернём маркер в исходное состояние:
+
+```bash
+printf 'owner=host\nstate=original\n' | \
+  sudo tee \
+  /srv/container-security-lab/practice-02/host-marker.txt \
+  >/dev/null
+
+sudo chown 10001:10001 \
+  /srv/container-security-lab/practice-02/host-marker.txt
+sudo chmod 0640 \
+  /srv/container-security-lab/practice-02/host-marker.txt
+```
+
+Зафиксируем время и повторим штатный и атакующий запросы:
+
+```bash
+LAB_BIND_OBSERVE_START=$(date --iso-8601=seconds)
+printf '%s\n' "$LAB_BIND_OBSERVE_START"
+
+curl --fail --silent --show-error \
+  --get \
+  --data-urlencode 'host=127.0.0.1' \
+  'http://127.0.0.1:8080/ping' | jq
+
+curl --fail --silent --show-error \
+  --get \
+  --data-urlencode 'host=127.0.0.1; printf "owner=host\nstate=observed-write\n" > /mnt/host-data/host-marker.txt' \
+  'http://127.0.0.1:8080/ping' | jq
+```
+
+Выведем события временного правила:
+
+```bash
+sudo journalctl \
+  -u falco-modern-bpf.service \
+  --since "$LAB_BIND_OBSERVE_START" \
+  --output=cat \
+  --no-pager | \
+  jq --raw-input --raw-output '
+    fromjson?
+    | select(.rule == "Laboratory container file write observation")
+    | [
+        .time,
+        .output_fields["evt.type"],
+        .output_fields["evt.res"],
+        .output_fields["fd.name"],
+        .output_fields["evt.arg.flags"],
+        .output_fields["proc.name"],
+        .output_fields["proc.pname"],
+        .output_fields["proc.cmdline"],
+        .output_fields["user.uid"],
+        .output_fields["container.name"]
+      ]
+    | @tsv
+  '
+```
+
+Ожидается событие успешного открытия `/mnt/host-data/host-marker.txt` для записи. Процессом, вероятнее всего, будет `sh`, потому что именно оболочка обрабатывает перенаправление `>`. Штатный запрос не должен создавать файлового события этого правила.
+
+> **ПРИШЛИТЕ ВЫВОД № 5.** Это ключевой вывод для настройки детекта. Пришлите результат команды с `journalctl` полностью. Если строк нет, дополнительно пришлите `sudo falco --dry-run` и последние 100 строк журнала службы Falco.
+
+### Проверка временного события в Kibana
+
+В `Discover` выберем представление `Falco events`, установим интервал эксперимента и зададим KQL-фильтр:
+
+```text
+rule : "Laboratory container file write observation"
+and output_fields.container_name : "lab-writable-bind-mount"
+```
+
+Добавим в таблицу поля:
+
+- `@timestamp`;
+- `rule`;
+- `priority`;
+- `output_fields.evt_type`;
+- `output_fields.evt_res`;
+- `output_fields.fd_name`;
+- `output_fields.evt_arg_flags`;
+- `output_fields.proc_name`;
+- `output_fields.proc_pname`;
+- `output_fields.proc_cmdline`;
+- `output_fields.user_name` и `output_fields.user_uid`;
+- `output_fields.container_name`.
+
+Falcosidekick с включённым `ELASTICSEARCH_FLATTENFIELDS=true` заменяет точки в именах полей Falco символами подчёркивания. Поэтому поле `fd.name` из исходного уведомления отображается в Elasticsearch как `output_fields.fd_name`.
+
+> **ПРИШЛИТЕ ВЫВОД № 6.** Нужны снимок таблицы Kibana и JSON одного документа через `View single document`. По нему проверим реальные имена полей перед окончательной редакцией главы.
+
+### Окончательное правило записи
+
+Если временное событие содержит ожидаемый путь `/mnt/host-data/host-marker.txt`, отключим правило наблюдения:
+
+```bash
+sudo mv \
+  /etc/falco/rules.d/02-writable-bind-mount-observe.yaml \
+  /etc/falco/rules.d/02-writable-bind-mount-observe.yaml.disabled
+```
+
+Создадим окончательное правило:
+
+```bash
+sudo vim \
+  /etc/falco/rules.d/02-writable-bind-mount.yaml
+```
+
+```yaml
+- macro: lab_successful_file_open_for_write
+  condition: >
+    evt.type in (open, openat, openat2)
+    and evt.dir=<
+    and evt.is_open_write=true
+    and fd.typechar='f'
+    and evt.rawres>=0
+
+- rule: Write to laboratory host bind mount
+  desc: >
+    Detects a successful file open for writing below the host directory
+    mounted into the laboratory container as read-write.
+  condition: >
+    lab_successful_file_open_for_write
+    and container.id != host
+    and container.name = "lab-writable-bind-mount"
+    and fd.name startswith "/mnt/host-data/"
+  output: >
+    File in laboratory host bind mount opened for writing |
+    evt_type=%evt.type result=%evt.res file=%fd.name
+    flags=%evt.arg.flags process=%proc.name
+    proc_exepath=%proc.exepath parent=%proc.pname
+    command=%proc.cmdline user=%user.name user_uid=%user.uid
+  priority: ERROR
+  tags:
+    - container
+    - filesystem
+    - host
+    - mitre_privilege_escalation
+    - T1611
+```
+
+Условие не привязано к имени `printf`, `sh` или другой программы. Опасным считается само успешное открытие файла в защищаемом каталоге для записи. Поэтому замена команды или способа запуска не должна обходить правило.
+
+Приоритет `ERROR` выше, чем в правиле первой практики: здесь зафиксировано не только неожиданное выполнение процесса, но и успешное изменение ресурса, физически расположенного на хосте.
+
+Правило намеренно контролирует только успешные открытия. После перевода точки монтирования в режим `read-only` неуспешная попытка не удовлетворит условию `evt.rawres>=0`. Факт предотвращения будем доказывать отдельно по ошибке приложения, параметру `RW: false` и неизменной контрольной сумме.
+
+> **ПРОВЕРКА ПЕРЕД ПРОДОЛЖЕНИЕМ.** Если в выводе № 5 Falco показал другой путь, не создавайте это окончательное правило без корректировки условия `fd.name startswith`. Сначала пришлите событие.
+
+Проверим и загрузим правило:
+
+```bash
+sudo falco --dry-run
+echo $?
+
+sudo systemctl restart falco-modern-bpf.service
+sudo systemctl --no-pager --full \
+  status falco-modern-bpf.service
+```
+
+### Проверка окончательного правила
+
+Для проверки используем четыре действия: штатный запрос, изменение существующего файла из контейнера, создание нового файла из контейнера и изменение маркера непосредственно на хосте.
+
+Сначала вернём исходное содержимое и удалим результат возможной предыдущей проверки:
+
+```bash
+printf 'owner=host\nstate=original\n' | \
+  sudo tee \
+  /srv/container-security-lab/practice-02/host-marker.txt \
+  >/dev/null
+
+sudo chown 10001:10001 \
+  /srv/container-security-lab/practice-02/host-marker.txt
+sudo chmod 0640 \
+  /srv/container-security-lab/practice-02/host-marker.txt
+
+sudo rm -f \
+  /srv/container-security-lab/practice-02/created-from-container.txt
+```
+
+Зафиксируем время:
+
+```bash
+LAB_BIND_RULE_START=$(date --iso-8601=seconds)
+printf '%s\n' "$LAB_BIND_RULE_START"
+```
+
+#### 1. Штатный запрос
+
+```bash
+curl --fail --silent --show-error \
+  --get \
+  --data-urlencode 'host=127.0.0.1' \
+  'http://127.0.0.1:8080/ping' | jq
+```
+
+Ожидаемый результат: приложение отвечает успешно, правило записи не срабатывает.
+
+#### 2. Изменение существующего файла из контейнера
+
+```bash
+curl --fail --silent --show-error \
+  --get \
+  --data-urlencode 'host=127.0.0.1; printf "owner=host\nstate=final-rule-test\n" > /mnt/host-data/host-marker.txt' \
+  'http://127.0.0.1:8080/ping' | jq
+```
+
+Ожидаемый результат: файл меняется, Falco создаёт уведомление с путём `/mnt/host-data/host-marker.txt`.
+
+#### 3. Создание нового файла из контейнера
+
+```bash
+curl --fail --silent --show-error \
+  --get \
+  --data-urlencode 'host=127.0.0.1; printf "created-by-container\n" > /mnt/host-data/created-from-container.txt' \
+  'http://127.0.0.1:8080/ping' | jq
+```
+
+Ожидаемый результат: в каталоге хоста появляется новый файл, а правило создаёт второе уведомление.
+
+#### 4. Административное изменение с хоста
+
+```bash
+printf 'owner=host\nstate=changed-from-host\n' | \
+  sudo tee \
+  /srv/container-security-lab/practice-02/host-marker.txt \
+  >/dev/null
+```
+
+Операция затрагивает тот же файл, но выполняется процессом хоста, для которого `container.id = host`. Наше правило ограничено лабораторным контейнером и не должно сработать.
+
+Выведем результаты:
+
+```bash
+sudo journalctl \
+  -u falco-modern-bpf.service \
+  --since "$LAB_BIND_RULE_START" \
+  --output=cat \
+  --no-pager | \
+  jq --raw-input --raw-output '
+    fromjson?
+    | select(.rule == "Write to laboratory host bind mount")
+    | [
+        .time,
+        .output_fields["fd.name"],
+        .output_fields["evt.arg.flags"],
+        .output_fields["proc.name"],
+        .output_fields["proc.pname"],
+        .output_fields["proc.cmdline"],
+        .output_fields["user.uid"],
+        .output_fields["container.name"]
+      ]
+    | @tsv
+  '
+```
+
+Ожидаются две строки: для перезаписи `host-marker.txt` и для создания `created-from-container.txt`. Штатный запрос и запись, выполненная с хоста, появиться не должны.
+
+> **ПРИШЛИТЕ ВЫВОД № 7.** Нужны четыре HTTP-результата или краткое подтверждение каждого действия, вывод `journalctl`, а также `sudo ls -l /srv/container-security-lab/practice-02`.
+
+### Проверка окончательного правила в Kibana
+
+В `Discover` используем фильтр:
+
+```text
+rule : "Write to laboratory host bind mount"
+and output_fields.container_name : "lab-writable-bind-mount"
+```
+
+Для таблицы выберем:
+
+- `@timestamp`;
+- `priority`;
+- `output_fields.fd_name`;
+- `output_fields.evt_arg_flags`;
+- `output_fields.proc_name`;
+- `output_fields.proc_pname`;
+- `output_fields.proc_cmdline`;
+- `output_fields.user_name` и `output_fields.user_uid`;
+- `output_fields.container_name`;
+- `output_fields.container_image_repository` и `output_fields.container_image_tag`.
+
+Две строки с разными путями показывают, что правило обнаруживает не конкретную строку команды, а класс операций — успешную запись из контейнера в подключённый каталог хоста.
+
+> **ПРИШЛИТЕ ВЫВОД № 8.** Нужен снимок таблицы Kibana после проверки окончательного правила. Его добавим в статью вместе с подписью, объясняющей выбранные поля.
+
+### Исправление конфигурации
+
+Приложению не требуется изменять лабораторные данные. Поэтому исправим не код контейнера, а режим точки монтирования. В `compose.yaml` изменим только один параметр:
+
+```yaml
+    volumes:
+      - type: bind
+        source: /srv/container-security-lab/practice-02
+        target: /mnt/host-data
+        read_only: true
+        bind:
+          propagation: rprivate
+```
+
+Пересоздадим контейнер, потому что параметры существующей точки монтирования не меняются простым перезапуском процесса:
+
+```bash
+sudo docker compose config --quiet
+sudo docker compose up \
+  --detach \
+  --force-recreate \
+  --wait
+```
+
+Проверим фактическую конфигурацию:
+
+```bash
+sudo docker inspect \
+  lab-writable-bind-mount \
+  --format '{{json .Mounts}}' | jq
+```
+
+Теперь для точки `/mnt/host-data` должно быть указано:
+
+```json
+"RW": false
+```
+
+Это проверять обязательно: успешное редактирование `compose.yaml` ещё не доказывает, что контейнер был пересоздан с новыми параметрами.
+
+### Повторная атака после исправления
+
+С хоста вернём контрольный файл в исходное состояние и сохраним его сумму в переменной:
+
+```bash
+printf 'owner=host\nstate=original\n' | \
+  sudo tee \
+  /srv/container-security-lab/practice-02/host-marker.txt \
+  >/dev/null
+
+sudo chown 10001:10001 \
+  /srv/container-security-lab/practice-02/host-marker.txt
+sudo chmod 0640 \
+  /srv/container-security-lab/practice-02/host-marker.txt
+
+BEFORE_BIND_TEST=$(sudo sha256sum \
+  /srv/container-security-lab/practice-02/host-marker.txt | \
+  awk '{print $1}')
+
+printf 'before=%s\n' "$BEFORE_BIND_TEST"
+```
+
+Повторим тот же запрос:
+
+```bash
+LAB_BIND_READONLY_START=$(date --iso-8601=seconds)
+
+curl --silent --show-error \
+  --get \
+  --data-urlencode 'host=127.0.0.1; printf "owner=host\nstate=should-not-appear\n" > /mnt/host-data/host-marker.txt' \
+  'http://127.0.0.1:8080/ping' | jq
+```
+
+Ожидаются ненулевой `returncode` и сообщение в `stderr`:
+
+```text
+/bin/sh: can't create /mnt/host-data/host-marker.txt: Read-only file system
+```
+
+Сравним контрольную сумму:
+
+```bash
+AFTER_BIND_TEST=$(sudo sha256sum \
+  /srv/container-security-lab/practice-02/host-marker.txt | \
+  awk '{print $1}')
+
+printf 'before=%s\nafter=%s\n' \
+  "$BEFORE_BIND_TEST" \
+  "$AFTER_BIND_TEST"
+
+test "$BEFORE_BIND_TEST" = "$AFTER_BIND_TEST" && \
+  echo 'Файл хоста не изменился'
+```
+
+Обе суммы должны совпадать, а последняя команда должна вывести `Файл хоста не изменился`.
+
+Проверим успешные записи после исправления:
+
+```bash
+sudo journalctl \
+  -u falco-modern-bpf.service \
+  --since "$LAB_BIND_READONLY_START" \
+  --output=cat \
+  --no-pager | \
+  jq --raw-input --raw-output '
+    fromjson?
+    | select(.rule == "Write to laboratory host bind mount")
+  '
+```
+
+Вывод должен быть пустым, потому что правило регистрирует только успешные открытия для записи, а ядро отклонило операцию. Пустой результат здесь нельзя рассматривать отдельно от остальных проверок. Предотвращение доказывает совокупность трёх фактов:
+
+- Docker сообщает `RW: false`;
+- приложение получает ошибку `Read-only file system`;
+- контрольная сумма файла остаётся неизменной.
+
+Если требуется отдельно обнаруживать заблокированные попытки, понадобится дополнительное правило для неуспешных файловых операций. Его условие и поле пути следует строить по фактической телеметрии неуспешного `openat`, поскольку при ошибке файловый дескриптор не создаётся и `fd.name` может быть недоступно.
+
+> **ПРИШЛИТЕ ВЫВОД № 9.** Нужны `docker inspect` после исправления, JSON-ответ повторной атаки, обе контрольные суммы и результат проверки журнала Falco.
+
+### Итог эксперимента
+
+После заполнения фактических результатов сведём проверки в таблицу:
+
+| Проверка | Ожидаемое действие | Ожидаемое уведомление |
+|---|---|---|
+| Штатный `ping` | Файл хоста не меняется | Нет |
+| Перезапись маркера из контейнера при `RW: true` | Файл меняется | Да |
+| Создание файла из контейнера при `RW: true` | Файл появляется на хосте | Да |
+| Изменение маркера непосредственно с хоста | Файл меняется | Нет |
+| Повторная атака при `RW: false` | Запись блокируется | Нет для правила успешной записи |
+
+Главный вывод практики состоит не в том, что контейнер «сломал Docker». Docker выполнил заданную конфигурацию: предоставил процессу прямой доступ к каталогу хоста. Изоляция ослабла в момент создания записываемой точки монтирования.
+
+Режим `read-only` устраняет возможность изменения, но не скрывает данные. Если приложение вообще не должно видеть каталог, правильнее полностью удалить `bind mount`. Минимальные полномочия означают не только запрет записи, но и отсутствие ненужного доступа на чтение.
+
+Окончательное правило Falco остаётся полезным как контроль конфигурации и поведения: оно показывает, что процесс контейнера действительно получил возможность записывать в ресурс хоста. Но основная защита должна находиться в конфигурации запуска — ненужный каталог не подключается, а необходимый для чтения публикуется с `read_only: true`.
+
+
+
+
+
+
+
+
+
+
 ## Основные источники
 
 ### Linux
